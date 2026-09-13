@@ -1,0 +1,10 @@
+/_build/
+/deps/
+/doc/
+/cover/
+/.elixir_ls/
+/.env
+/priv/keys/
+*.pem
+erl_crash.dump
+postbeam-*.tar
