@@ -13,6 +13,8 @@ defmodule Postbeam.MixProject do
           Postbeam.TestTransport,
           Postbeam.TestReceiver,
           Postbeam.TestDNSServer,
+          Postbeam.TestMailer,
+          Postbeam.SecondTestMailer,
           Postbeam.StorageTest.Store,
           Postbeam.StorageTest.FailingKeyStore
         ]
@@ -21,16 +23,25 @@ defmodule Postbeam.MixProject do
       deps: deps(),
       docs: [
         main: "readme",
-        extras: ["README.md", "guides/adapters.md", "guides/storage.md"]
+        extras: [
+          "README.md",
+          "docs/swoosh.md",
+          "docs/configuration.md",
+          "docs/delivery.md",
+          "docs/domain-setup.md",
+          "docs/dkim.md",
+          "docs/adapters.md"
+        ]
       ],
       dialyzer: [flags: [:error_handling, :unmatched_returns]],
       description: "A small outbound SMTP sender that delivers directly to recipient MX servers",
       package: [
         licenses: ["Apache-2.0"],
+        links: %{"GitHub" => "https://github.com/elchemista/postbeam"},
         files: [
           "lib",
           "examples",
-          "guides",
+          "docs",
           "mix.exs",
           "README.md",
           "LICENSE",
@@ -43,13 +54,13 @@ defmodule Postbeam.MixProject do
 
   def application,
     do: [
-      mod: {Postbeam.Application, []},
       extra_applications: [:logger, :crypto, :public_key, :ssl]
     ]
 
   defp deps do
     [
       {:gen_smtp, "~> 1.3.0"},
+      {:swoosh, "~> 1.28", optional: true},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}

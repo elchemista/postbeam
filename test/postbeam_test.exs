@@ -90,7 +90,6 @@ defmodule PostbeamTest do
           from: "x@example.com\r\nBcc: y@example.com",
           to: "a\nb@example.net",
           to: "a..b@example.net",
-          to: "ü@example.net",
           to: "a@-example.net",
           to: ["a@example.net"],
           subject: "Hello\nBcc: a@example.net",

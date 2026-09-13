@@ -9,16 +9,15 @@ defmodule Postbeam.DKIM do
       # Publish record.value at record.name (or record.host in your DNS zone).
 
   RSA keys are 2048 bits. Managed signing omits `:private_key`; the default store
-  is `Postbeam.KeyStore.File`. Configured managed keys are prepared when the
-  Postbeam application starts, and per-call keys on first delivery. Subsequent
-  calls read the existing key. Stores needed during application startup must
-  already be running (for example, in an OTP application dependency).
+  is `Postbeam.KeyStore.File`. Managed keys are prepared on first delivery;
+  subsequent calls read the existing key.
 
   An unreadable, corrupt or non-RSA stored key fails closed. To rotate, choose a
   new selector, call `setup/1`, publish its record, then switch delivery settings.
   No DNS is modified and no email is sent by this module.
   """
-  alias Postbeam.{Config, Store}
+  alias Postbeam.Config
+  alias Postbeam.Store
 
   @type dns_record :: %{
           type: :txt,
@@ -61,6 +60,7 @@ defmodule Postbeam.DKIM do
     end
   end
 
+  @spec prepare_key(keyword(), Config.t()) :: {:ok, Config.t()} | {:error, error()}
   defp prepare_key(dkim, config) do
     if Keyword.has_key?(dkim, :private_key) do
       {:ok, config}
@@ -71,6 +71,7 @@ defmodule Postbeam.DKIM do
     end
   end
 
+  @spec managed(keyword() | nil) :: {:ok, keyword()} | {:error, error()}
   defp managed(nil), do: {:error, {:dkim, :not_configured}}
 
   defp managed(dkim) do
@@ -79,6 +80,8 @@ defmodule Postbeam.DKIM do
       else: {:ok, dkim}
   end
 
+  @spec load(keyword(), Postbeam.KeyStore.adapter()) ::
+          {:ok, binary(), tuple()} | {:error, error()}
   defp load(dkim, store) do
     id = {String.downcase(dkim[:d]), String.downcase(dkim[:s])}
 
@@ -88,6 +91,8 @@ defmodule Postbeam.DKIM do
     end
   end
 
+  @spec generate(Postbeam.KeyStore.id(), Postbeam.KeyStore.adapter()) ::
+          {:ok, binary(), tuple()} | {:error, error()}
   defp generate(id, store) do
     key = :public_key.generate_key({:rsa, 2048, 65_537})
     pem = :public_key.pem_encode([:public_key.pem_entry_encode(:RSAPrivateKey, key)])
@@ -101,15 +106,18 @@ defmodule Postbeam.DKIM do
     error -> {:error, {:dkim, {:generation, error.__struct__}}}
   end
 
+  @spec stored(term()) :: {:ok, binary(), tuple()} | {:error, error()}
   defp stored({:ok, pem}) do
     with {:ok, key} <- decode(pem), do: {:ok, pem, key}
   end
 
   defp stored(result), do: store_error(result)
 
+  @spec store_error(term()) :: {:error, error()}
   defp store_error({:error, reason}), do: {:error, {:dkim, {:store, reason}}}
   defp store_error(_), do: {:error, {:dkim, :invalid_store_response}}
 
+  @spec decode(binary()) :: {:ok, tuple()} | {:error, error()}
   defp decode(pem) do
     with [entry] <- :public_key.pem_decode(pem),
          {:RSAPrivateKey, _, _, _, _, _, _, _, _, _, _} = key <-

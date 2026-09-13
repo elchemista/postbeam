@@ -13,7 +13,10 @@ defmodule Postbeam.KeyStore.File do
   """
   @behaviour Postbeam.KeyStore
 
-  @impl true
+  @impl Postbeam.KeyStore
+  @doc "Reads the PEM for a domain and selector from the configured directory."
+  @spec fetch(Postbeam.KeyStore.id(), keyword()) ::
+          {:ok, binary()} | :not_found | {:error, term()}
   def fetch(id, options) do
     with {:ok, path} <- path(id, options) do
       case File.read(path) do
@@ -23,7 +26,9 @@ defmodule Postbeam.KeyStore.File do
     end
   end
 
-  @impl true
+  @impl Postbeam.KeyStore
+  @doc "Atomically persists a new PEM without overwriting an existing key."
+  @spec put_new(Postbeam.KeyStore.id(), binary(), keyword()) :: :ok | {:error, term()}
   def put_new(id, pem, options) do
     with {:ok, path} <- path(id, options),
          :ok <- File.mkdir_p(Path.dirname(path)) do
@@ -31,6 +36,7 @@ defmodule Postbeam.KeyStore.File do
     end
   end
 
+  @spec path(Postbeam.KeyStore.id(), keyword()) :: {:ok, String.t()} | {:error, :invalid_key_path}
   defp path({domain, selector}, options) do
     directory =
       Keyword.get_lazy(options, :directory, fn -> Application.app_dir(:postbeam, "priv/keys") end)
@@ -43,6 +49,7 @@ defmodule Postbeam.KeyStore.File do
     end
   end
 
+  @spec publish(String.t(), binary()) :: :ok | {:error, term()}
   defp publish(path, pem) do
     temporary = path <> "." <> Base.url_encode64(:crypto.strong_rand_bytes(16), padding: false)
 

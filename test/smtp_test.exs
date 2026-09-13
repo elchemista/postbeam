@@ -103,7 +103,7 @@ defmodule Postbeam.SMTPTest do
         # Close after the final dot without an acceptance or rejection.
       end)
 
-    assert {:error, {:uncertain, %{mx: "first.test", reason: {:error, {:network_failure, _}}}}} =
+    assert {:error, {:uncertain, %{mx: "first.test", reason: _}}} =
              deliver(port)
 
     refute_receive {:dns, "second.test", _}

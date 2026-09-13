@@ -11,8 +11,6 @@ defmodule Postbeam.MessageTest do
 
   for {name, value} <- [
         {"display name", "User <user@example.net>"},
-        {"quoted local part", "\"user name\"@example.net"},
-        {"domain literal", "user@[127.0.0.1]"},
         {"extra at sign", "user@@example.net"},
         {"empty local part", "@example.net"},
         {"empty domain", "user@"},
@@ -22,7 +20,6 @@ defmodule Postbeam.MessageTest do
         {"long DNS label", "user@" <> String.duplicate("a", 64) <> ".net"},
         {"domain underscore", "user@my_domain.net"},
         {"trailing DNS hyphen", "user@example-.net"},
-        {"raw IDN", "user@caffè.net"},
         {"invalid UTF-8", <<255, "@example.net">>},
         {"NUL", "user\0@example.net"},
         {"address too long",
@@ -87,5 +84,12 @@ defmodule Postbeam.MessageTest do
     refute first.message_id == second.message_id
     assert first.data =~ first.message_id
     assert second.data =~ second.message_id
+  end
+
+  test "unsupported mailbox syntax is rejected before composing MIME" do
+    for address <- ["用户@example.net", "a@例子.测试", ~s("quoted name"@example.net), "a@[127.0.0.1]"] do
+      assert {:error, {:invalid, :to}} =
+               Message.new(from: "a@example.com", to: address, subject: "", text: "")
+    end
   end
 end
