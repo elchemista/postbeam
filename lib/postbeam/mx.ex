@@ -64,6 +64,22 @@ defmodule Postbeam.MX do
   @doc "Default DNS adapter, backed by `:inet_res.resolve/5`."
   @spec lookup(String.t(), record_type(), Config.t()) :: lookup_result()
   def lookup(domain, type, config) do
+    case lookup_with_ttl(domain, type, config) do
+      {:ok, records, _ttl} -> {:ok, records}
+      {:error, _} = error -> error
+    end
+  end
+
+  @doc """
+  Returns DNS records and their minimum TTL in seconds for caching adapters.
+
+  CNAME lifetimes in the answer also limit this TTL. Empty answers and TTLs
+  with the reserved high bit set get a zero lifetime. No negative caching is
+  performed. `lookup/3` keeps the original adapter contract without TTL metadata.
+  """
+  @spec lookup_with_ttl(String.t(), record_type(), Config.t()) ::
+          {:ok, [dns_record()], non_neg_integer()} | {:error, term()}
+  def lookup_with_ttl(domain, type, config) do
     case :inet_res.resolve(
            String.to_charlist(domain),
            :in,
@@ -72,17 +88,31 @@ defmodule Postbeam.MX do
            Keyword.get(config, :dns_timeout, 5_000)
          ) do
       {:ok, response} ->
-        {:ok,
-         for(
-           record <- :inet_dns.msg(response, :anlist),
-           :inet_dns.rr(record, :type) == type,
-           :inet_dns.rr(record, :class) == :in,
-           do: :inet_dns.rr(record, :data)
-         )}
+        answers =
+          for record <- :inet_dns.msg(response, :anlist),
+              :inet_dns.rr(record, :class) == :in,
+              :inet_dns.rr(record, :type) in [type, :cname],
+              do: record
+
+        records =
+          for record <- answers,
+              :inet_dns.rr(record, :type) == type,
+              do: :inet_dns.rr(record, :data)
+
+        {:ok, records, minimum_ttl(answers)}
 
       {:error, _} = error ->
         error
     end
+  end
+
+  defp minimum_ttl(answers) do
+    answers
+    |> Enum.map(fn answer ->
+      ttl = :inet_dns.rr(answer, :ttl)
+      if ttl in 0..2_147_483_647, do: ttl, else: 0
+    end)
+    |> Enum.min(fn -> 0 end)
   end
 
   @spec query(String.t(), record_type(), Config.t()) ::

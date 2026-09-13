@@ -24,7 +24,7 @@ defmodule Postbeam.Message do
               optional(:html) => String.t() | nil
             }
   @type validation_error :: {:invalid, atom()} | {:unknown_field, term()}
-  @type composition_error :: {:composition, atom()}
+  @type composition_error :: {:composition, atom()} | Postbeam.DKIM.error()
   @typedoc "A validated message, optionally already encoded."
   @type t :: message(binary() | nil, String.t() | nil)
   @typedoc "A message whose immutable wire data and Message-ID are ready for SMTP."
@@ -84,13 +84,18 @@ defmodule Postbeam.Message do
   Generates a fresh random Message-ID on each call. Text and HTML together become
   `multipart/alternative`, with text first. Bodies use base64 transfer encoding,
   so non-ASCII content does not require the SMTP 8BITMIME extension. `:mimemail`
-  supplies Date, MIME headers and optional DKIM signing.
+  supplies Date, MIME headers and optional DKIM signing. Managed keys are loaded
+  or generated through `Postbeam.DKIM` before composing bytes.
 
   Reuse the returned `data` for fallback attempts. Composition failures return
   only the error class, never exception arguments that could contain a key.
   """
   @spec encode(t(), Config.t()) :: {:ok, encoded()} | {:error, composition_error()}
   def encode(message, config) do
+    with {:ok, config} <- Postbeam.DKIM.prepare(config), do: compose(message, config)
+  end
+
+  defp compose(message, config) do
     id =
       "<" <>
         Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false) <>

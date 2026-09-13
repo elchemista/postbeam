@@ -1,6 +1,7 @@
 defmodule Postbeam.DNSTest do
   use ExUnit.Case, async: true
   alias Postbeam.TestReceiver
+  import Postbeam.TestDNSServer, only: [dns: 1]
 
   test "OTP resolver distinguishes NODATA, Null MX and NXDOMAIN over actual local DNS" do
     options =
@@ -42,50 +43,4 @@ defmodule Postbeam.DNSTest do
 
     TestReceiver.done(token)
   end
-
-  defp dns(records) do
-    {:ok, socket} = :gen_udp.open(0, [:binary, active: false, ip: {127, 0, 0, 1}])
-    {:ok, {_, port}} = :inet.sockname(socket)
-    pid = spawn(fn -> respond(socket, records) end)
-
-    on_exit(fn ->
-      Process.exit(pid, :kill)
-      :gen_udp.close(socket)
-    end)
-
-    [
-      dns_timeout: 500,
-      dns_options: [nameservers: [{{127, 0, 0, 1}, port}], alt_nameservers: [], retry: 1]
-    ]
-  end
-
-  defp respond(socket, records) do
-    with {:ok, {ip, port, packet}} <- :gen_udp.recv(socket, 0, 5_000) do
-      {:ok, query} = :inet_dns.decode(packet)
-      [question] = :inet_dns.msg(query, :qdlist)
-      domain = :inet_dns.dns_query(question, :domain)
-      type = :inet_dns.dns_query(question, :type)
-      result = Map.get(records, {to_string(domain), type}, [])
-
-      answers = answers(result, domain, type)
-
-      header =
-        :inet_dns.make_header(:inet_dns.msg(query, :header),
-          qr: true,
-          ra: true,
-          rcode: if(result == :nxdomain, do: 3, else: 0)
-        )
-
-      response = :inet_dns.make_msg(query, header: header, anlist: answers)
-      :gen_udp.send(socket, ip, port, :inet_dns.encode(response))
-      respond(socket, records)
-    end
-  end
-
-  defp answers(records, domain, type) when is_list(records) do
-    for data <- records,
-        do: :inet_dns.make_rr(domain: domain, type: type, class: :in, ttl: 0, data: data)
-  end
-
-  defp answers(_, _, _), do: []
 end

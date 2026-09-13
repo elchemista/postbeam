@@ -14,17 +14,13 @@ tls =
   end
 
 dkim =
-  case System.get_env("POSTBEAM_DKIM_KEY") do
-    nil ->
-      nil
-
-    path ->
-      [
-        d: required.("DKIM_DOMAIN"),
-        s: required.("DKIM_SELECTOR"),
-        private_key: {:pem_plain, File.read!(path)}
-      ]
+  case System.get_env("POSTBEAM_DKIM_DOMAIN") do
+    nil -> nil
+    domain -> [d: domain, s: System.get_env("POSTBEAM_DKIM_SELECTOR", "postbeam")]
   end
+
+# Retrieve the public record in application code with Postbeam.DKIM.setup/1
+# and publish it before running this example. Sending does not publish DNS.
 
 result =
   Postbeam.deliver(

@@ -22,7 +22,9 @@ defmodule Postbeam.Config do
           | {:port, 1..65_535}
           | {:connect_timeout | :smtp_timeout | :dns_timeout, milliseconds()}
           | {:dns_options, keyword()}
-          | {:dkim, :mimemail.dkim_options() | nil}
+          | {:dkim, keyword() | nil}
+          | {:key_store, Postbeam.KeyStore.adapter()}
+          | {:sent_store, Postbeam.SentStore.adapter() | nil}
           | {:resolver | :transport, module()}
   @type t :: [option()]
   @type error :: {:invalid, :config} | {:invalid_config, atom()}
@@ -37,6 +39,8 @@ defmodule Postbeam.Config do
     dns_timeout: 5_000,
     dns_options: [],
     dkim: nil,
+    key_store: Postbeam.KeyStore.File,
+    sent_store: nil,
     resolver: Postbeam.MX,
     transport: Postbeam.SMTP
   ]
@@ -102,11 +106,14 @@ defmodule Postbeam.Config do
   defp valid?(key, value) when key in [:tls_options, :dns_options], do: keyword?(value)
   defp valid?(:resolver, value), do: adapter?(value, :lookup, 3)
   defp valid?(:transport, value), do: adapter?(value, :deliver, 3)
+  defp valid?(:key_store, value), do: Postbeam.Store.valid?(value, fetch: 2, put_new: 3)
+  defp valid?(:sent_store, nil), do: true
+  defp valid?(:sent_store, value), do: Postbeam.Store.valid?(value, put: 2)
   defp valid?(:dkim, nil), do: true
 
   defp valid?(:dkim, value) do
     keyword?(value) and domain?(value[:d]) and domain?(value[:s]) and
-      key?(value[:private_key]) and Enum.all?(value, &dkim_option?/1)
+      dkim_key?(value) and Enum.all?(value, &dkim_option?/1)
   end
 
   defp valid?(_, _), do: false
@@ -133,6 +140,12 @@ defmodule Postbeam.Config do
   end
 
   defp datetime?(_), do: false
+
+  defp dkim_key?(options) do
+    if Keyword.has_key?(options, :private_key),
+      do: key?(options[:private_key]),
+      else: Keyword.get(options, :a, :"rsa-sha256") == :"rsa-sha256"
+  end
 
   defp key?({:pem_plain, pem}), do: is_binary(pem) and byte_size(pem) > 0
 

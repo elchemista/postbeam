@@ -61,7 +61,9 @@ config :postbeam,
 | `smtp_timeout` | `60_000` | Hard total timeout per IP attempt, including greeting, TLS and DATA |
 | `dns_timeout` | `5_000` | Timeout per DNS query in milliseconds |
 | `dns_options` | `[]` | Options for `:inet_res.resolve/5`, e.g. private nameservers |
-| `dkim` | `nil` | `:mimemail` signing options, shown below |
+| `dkim` | `nil` | Managed signing: `[d: "example.com", s: "postbeam"]`; explicit PEM also supported |
+| `key_store` | `Postbeam.KeyStore.File` | Private-key adapter, optionally `{module, options}` |
+| `sent_store` | `nil` | Optional accepted-email archive; `Postbeam.SentStore.ETS` keeps the last 10 |
 | `resolver` | `Postbeam.MX` | DNS adapter implementing `lookup/3` |
 | `transport` | `Postbeam.SMTP` | Transport adapter implementing `deliver/3` |
 
@@ -75,7 +77,57 @@ through `tls_options` for private SMTP servers.
 
 Timeouts are finite per operation, not a single end-to-end delivery deadline:
 multiple MX hosts, addresses and DNS queries can increase total elapsed time.
-The application creates no persistent processes, queue or database.
+The Postbeam application supervises a small ETS archive owner; it remains empty
+unless archiving is enabled. There is no queue or database. The optional DNS cache
+below adds a separate supervised owner process.
+
+## Optional sent-email archive
+
+Enable the default bounded archive with `config :postbeam, sent_store: Postbeam.SentStore.ETS`,
+or pass `sent_store: Postbeam.SentStore.ETS` to `Postbeam.deliver/2`.
+
+```elixir
+{:ok, entries} = Postbeam.SentStore.ETS.list()
+# Newest first, up to 10 entries. Each has :message, :receipt and :accepted_at.
+```
+
+With archiving enabled, successful delivery receipts include `storage: :ok` or
+`storage: {:error, reason}`. An archive error still means SMTP accepted the email;
+do not resend to repair an archive. Unsuccessful/uncertain deliveries are not
+archived. ETS loses entries on restart and limits count, not bytes. For custom
+capacity or durable storage, see [key and email stores](guides/storage.md).
+
+## Optional ETS DNS cache
+
+For repeated deliveries to the same domains, add the cache owner to your
+application's supervision tree:
+
+```elixir
+children = [
+  {Postbeam.CachedDNS, max_entries: 10_000, max_ttl: 3_600, cleanup_interval: 60_000}
+]
+Supervisor.start_link(children, strategy: :one_for_one)
+```
+
+Then configure `resolver: Postbeam.CachedDNS` in `config :postbeam` or pass it to
+`Postbeam.deliver/2`. The default remains `Postbeam.MX` with no application cache.
+No extra dependency is needed.
+
+Positive MX/A/AAAA answers (including Null MX) are cached until their minimum
+DNS/CNAME TTL expires. `max_ttl` is a seconds-based upper bound, not a substitute
+for the DNS TTL. `cleanup_interval` is in milliseconds. Errors, NODATA and TTL-zero
+answers are never cached. DNS options and record types have separate cache keys.
+
+Reads access a protected ETS table directly. The owner serializes writes and
+evicts an arbitrary entry when `max_entries` is reached; this is an entry-count
+limit, not a byte limit or LRU policy. If the owner is absent, restarting or too
+busy to accept a write within 50 ms, delivery continues using ordinary DNS.
+`Postbeam.CachedDNS.clear/0` clears existing entries; call it after changing
+system-wide resolver settings. Explicit DNS options are already part of the key.
+
+The cache is local to one BEAM node, does not survive owner restarts and does
+not coalesce simultaneous cache misses. It improves repeated lookups; it does
+not add SMTP concurrency limits, rate limiting or durable delivery state.
 
 ## Results and retry policy
 
@@ -136,7 +188,9 @@ hostname, validated message with encoded `data` and `message_id`, and merged
 options. Return `{:ok, receipt}` or `{:error, {classification, reason}}`, where
 classification is `:retry`, `:permanent` or `:uncertain`. Custom transports own
 their timeouts and must never classify ambiguous acceptance as retryable.
-Adapter programming errors propagate so they can be fixed at their source.
+DNS/transport programming errors propagate so they can be fixed at their source.
+Store exceptions instead become structured errors, as described in the
+[storage guide](guides/storage.md).
 
 Persistent queues, deferred retries/backoff, rate limiting, pooling, bounce
 processing, attachments, multiple recipients, SMTPUTF8 and MTA-STS/DANE remain
@@ -150,10 +204,10 @@ Configure your own sender and test mailbox, then run:
 export POSTBEAM_FROM='hello@example.com'
 export POSTBEAM_TO='recipient@example.net'
 export POSTBEAM_HOSTNAME='mta.example.com'
-# Optional signing (all three settings required together):
+# Optional signing: publish the record from Postbeam.DKIM.setup/1 first.
+# The selector defaults to postbeam.
 export POSTBEAM_DKIM_DOMAIN='example.com'
 export POSTBEAM_DKIM_SELECTOR='postbeam'
-export POSTBEAM_DKIM_KEY='priv/keys/postbeam.pem'
 mix run examples/send.exs
 ```
 
@@ -182,8 +236,8 @@ are development/test-only dependencies; ExDoc generates HTML/EPUB API reference.
 Production retains `gen_smtp` as its only direct runtime dependency.
 
 See the [adapter and architecture guide](guides/adapters.md) for callback contracts,
-message lifecycle and extension points, and the [quality guide](guides/quality.md)
-for tooling, coverage and test boundaries. Public types distinguish validated and
+message lifecycle and extension points, and the [storage guide](guides/storage.md)
+for key persistence and email archives. Public types distinguish validated and
 encoded messages and describe receipts, DNS errors and terminal SMTP outcomes.
 
 External mailbox delivery has not been verified: sender domain, server hostname,
@@ -232,7 +286,7 @@ If you already use email on this domain, also follow the notes below the table.
 | --- | --- | --- | --- |
 | A Record | `mta` | `203.0.113.10` | Automatic |
 | TXT Record — SPF | `@` | `v=spf1 ip4:203.0.113.10 -all` | Automatic |
-| TXT Record — DKIM | `postbeam._domainkey` | `v=DKIM1; k=rsa; p=BASE64_PUBLIC_KEY` | Automatic |
+| TXT Record — DKIM | `postbeam._domainkey` | Copy `record.value` returned by `Postbeam.DKIM.setup/1` (step 3) | Automatic |
 | TXT Record — DMARC | `_dmarc` | `v=DMARC1; p=none` | Automatic |
 
 Select **TXT Record** in the menu for all three SPF/DKIM/DMARC entries. Paste
@@ -269,44 +323,48 @@ requesting quarantine or rejection through DMARC. To receive reports, add
 a DMARC policy, keep it and align the new sender with your existing configuration.
 [DMARC setup](https://knowledge.workspace.google.com/admin/security/set-up-dmarc?hl=en).
 
-### 3. Generate the DKIM key on the server
+### 3. Generate the DKIM record from application code
 
-From the project directory, generate a 2048-bit RSA key once. The file check
-prevents replacing a key that is already in use:
+Configure the signing domain and selector in your application:
 
-```bash
-(
-  umask 077
-  mkdir -p priv/keys
-  if [ ! -e priv/keys/postbeam.pem ]; then
-    openssl genrsa -out priv/keys/postbeam.pem 2048
-  fi
-)
+```elixir
+config :postbeam,
+  hostname: "mta.example.com",
+  tls: :always,
+  dkim: [d: "example.com", s: "postbeam"]
 ```
 
-To get the complete value to paste into the DKIM TXT record:
+Postbeam generates a 2048-bit RSA key at application startup only if the key
+store has no key for this domain and selector. The default adapter saves it in
+`Application.app_dir(:postbeam, "priv/keys/example.com/postbeam.pem")` with mode
+`0600`. It reuses that key on subsequent starts and deliveries. No OpenSSL or
+manual key-file creation is needed.
 
-```bash
-openssl pkey -in priv/keys/postbeam.pem -pubout -outform DER |
-  openssl base64 -A |
-  awk '{ print "v=DKIM1; k=rsa; p=" $0 }'
+Retrieve the DNS record from your application code (for example, an admin page):
+
+```elixir
+{:ok, record} = Postbeam.DKIM.setup()
+record.host  # "postbeam._domainkey"
+record.name  # "postbeam._domainkey.example.com"
+record.value # complete "v=DKIM1; k=rsa; p=..." value, without surrounding quotes
 ```
 
-Publish the entire output line under **Host `postbeam._domainkey`**.
-The private key at `priv/keys/postbeam.pem` stays on the server and is excluded
-from Git. Keep using the same key to sign messages; replacing it requires
-updating DNS. [RSA key generation](https://docs.openssl.org/3.6/man1/openssl-genrsa/)
-and [public key export](https://docs.openssl.org/3.6/man1/openssl-pkey/).
+Publish **`record.value`** as one TXT record under **`record.host`** in Namecheap.
+This API returns public data only and can be called repeatedly. Wait for DNS
+propagation before sending signed email. With per-call configuration, use
+`Postbeam.DKIM.setup(dkim: [d: "example.com", s: "postbeam"])` before the first send.
+
+The key store must remain writable and persistent across deployments. A fresh
+container or release directory can lose local keys; configure a persistent
+location or your own `Postbeam.KeyStore` adapter. Nodes sharing a domain/selector
+must share the same key. See [key and email stores](guides/storage.md) for custom
+adapters, startup ordering and rotation. Keys are excluded from the package/Git.
 
 Namecheap's TXT field supports values long enough for this key.
 [Namecheap TXT limits](https://www.namecheap.com/support/knowledgebase/article.aspx/10058/10/namecheap-dns-limits/).
 If `dig` shows multiple quoted strings on one line, they are parts of the same
 TXT record. Do not create separate DKIM records to split the key.
 [DKIM TXT record format](https://www.rfc-editor.org/rfc/rfc6376.html#section-3.6.2.2).
-
-DNS publishes the public key. Postbeam must also sign each message using the
-private key with **`d=example.com`** and **`s=postbeam`**.
-[DKIM in gen_smtp](https://github.com/gen-smtp/gen_smtp#dkim-signing-of-outgoing-emails).
 
 ### 4. Set up reverse DNS / PTR
 
@@ -408,11 +466,7 @@ Postbeam.deliver(
   ],
   hostname: "mta.example.com",
   tls: :always,
-  dkim: [
-    d: "example.com",
-    s: "postbeam",
-    private_key: {:pem_plain, File.read!("priv/keys/postbeam.pem")}
-  ]
+  dkim: [d: "example.com", s: "postbeam"]
 )
 ```
 

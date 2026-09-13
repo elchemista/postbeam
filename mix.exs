@@ -5,16 +5,23 @@ defmodule Postbeam.MixProject do
     [
       app: :postbeam,
       version: "0.1.0",
-      elixir: "~> 1.15",
+      elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
       test_coverage: [
-        ignore_modules: [Postbeam.TestDNS, Postbeam.TestTransport, Postbeam.TestReceiver]
+        ignore_modules: [
+          Postbeam.TestDNS,
+          Postbeam.TestTransport,
+          Postbeam.TestReceiver,
+          Postbeam.TestDNSServer,
+          Postbeam.StorageTest.Store,
+          Postbeam.StorageTest.FailingKeyStore
+        ]
       ],
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       docs: [
         main: "readme",
-        extras: ["README.md", "guides/adapters.md", "guides/quality.md"]
+        extras: ["README.md", "guides/adapters.md", "guides/storage.md"]
       ],
       dialyzer: [flags: [:error_handling, :unmatched_returns]],
       description: "A small outbound SMTP sender that delivers directly to recipient MX servers",
@@ -34,7 +41,11 @@ defmodule Postbeam.MixProject do
     ]
   end
 
-  def application, do: [extra_applications: [:logger, :crypto, :public_key, :ssl]]
+  def application,
+    do: [
+      mod: {Postbeam.Application, []},
+      extra_applications: [:logger, :crypto, :public_key, :ssl]
+    ]
 
   defp deps do
     [
