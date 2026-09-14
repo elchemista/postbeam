@@ -8,7 +8,11 @@ support. Includes TLS, DKIM, text/HTML bodies and Swoosh attachments.
 Requires Elixir 1.19+ and Erlang/OTP 26+. For a local checkout:
 
 ```elixir
-{:postbeam, github: "elchemista/postbeam"}
+  defp deps do
+    [
+      {:postbeam, github: "elchemista/postbeam"}
+    ]
+  end
 ```
 
 ## Send
