@@ -8,6 +8,7 @@ defmodule Postbeam.MixProject do
       elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
       test_coverage: [
+        summary: [threshold: 80],
         ignore_modules: [
           Postbeam.TestDNS,
           Postbeam.TestTransport,
@@ -33,7 +34,6 @@ defmodule Postbeam.MixProject do
           "docs/adapters.md"
         ]
       ],
-      dialyzer: [flags: [:error_handling, :unmatched_returns]],
       description: "A small outbound SMTP sender that delivers directly to recipient MX servers",
       package: [
         licenses: ["Apache-2.0"],

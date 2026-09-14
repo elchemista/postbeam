@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.task }} / Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - task: Tests
+            elixir: "1.19.x"
+            otp: "28.x"
+            env: test
+            command: mix test --cover
+          - task: Tests
+            elixir: "1.20.x"
+            otp: "29.x"
+            env: test
+            command: mix test --cover
+          - task: Credo
+            elixir: "1.20.x"
+            otp: "29.x"
+            env: dev
+            command: mix credo
+          - task: Dialyzer
+            elixir: "1.20.x"
+            otp: "29.x"
+            env: dev
+            command: mix dialyzer --format github
+    env:
+      MIX_ENV: ${{ matrix.env }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Erlang and Elixir
+        id: beam
+        uses: erlef/setup-beam@v1.24.1
+        with:
+          otp-version: ${{ matrix.otp }}
+          elixir-version: ${{ matrix.elixir }}
+
+      - name: Restore dependencies, build and PLT cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-${{ matrix.task }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.task }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-
+
+      - name: Install dependencies
+        run: mix deps.get --only "$MIX_ENV" --check-locked
+
+      - name: Run ${{ matrix.task }}
+        run: ${{ matrix.command }}
