@@ -6,13 +6,14 @@ defmodule Postbeam.SMTP do
   `:retry` allows another MX, `:permanent` stops delivery, `:uncertain` stops
   delivery because the server may already have accepted the message.
 
-  The default adapter tries every A/AAAA address and delegates the protocol to
-  `:gen_smtp_client`. Each address attempt owns its sockets in a short-lived
+  The default adapter tries every A/AAAA address using `:gen_smtp_client`. Each address attempt owns its sockets in a short-lived
   monitored process with a hard `smtp_timeout` (including connection and TLS).
   `connect_timeout` additionally bounds each TCP connection.
   """
 
-  alias Postbeam.{Config, Message, MX}
+  alias Postbeam.Config
+  alias Postbeam.Message
+  alias Postbeam.MX
 
   @typedoc "Only `:retry` authorizes the orchestrator to attempt another MX."
   @type failure :: {:retry | :permanent | :uncertain, term()}
@@ -37,8 +38,7 @@ defmodule Postbeam.SMTP do
   are disabled. STARTTLS verifies the MX certificate against system CAs unless
   explicitly overridden in `:tls_options`.
 
-  The DATA marker is emitted just before the DATA command because that is the
-  hook exposed by `gen_smtp`. Network failures from that point are conservatively
+  The DATA marker is emitted just before the DATA command. Network failures from that point are conservatively
   uncertain. Each worker exits after its attempt, releasing owned TCP/TLS sockets.
   """
   @spec deliver(String.t(), Message.encoded(), Config.t()) :: result()
@@ -49,6 +49,9 @@ defmodule Postbeam.SMTP do
     end
   end
 
+  @spec attempt_addresses([:inet.ip_address()], String.t(), Message.encoded(), Config.t(), [
+          {:inet.ip_address(), term()}
+        ]) :: result()
   defp attempt_addresses([], host, _, _, errors),
     do: {:error, {:retry, {:addresses_exhausted, host, Enum.reverse(errors)}}}
 
@@ -62,6 +65,7 @@ defmodule Postbeam.SMTP do
     end
   end
 
+  @spec attempt(:inet.ip_address(), String.t(), Message.encoded(), Config.t()) :: result()
   defp attempt(address, host, message, config) do
     parent = self()
     token = make_ref()
@@ -91,6 +95,14 @@ defmodule Postbeam.SMTP do
     exit({token, result})
   end
 
+  @spec transact(
+          pid(),
+          reference(),
+          :inet.ip_address(),
+          String.t(),
+          Message.encoded(),
+          Config.t()
+        ) :: term()
   defp transact(parent, token, address, host, message, config) do
     case :gen_smtp_client.open(options(address, host, config)) do
       {:ok, socket} ->
@@ -121,6 +133,7 @@ defmodule Postbeam.SMTP do
     end
   end
 
+  @spec classify(term(), phase()) :: result()
   defp classify({:ok, receipt}, _), do: {:ok, receipt}
 
   defp classify({:error, _, {kind, _host, reason}}, phase),
@@ -135,6 +148,7 @@ defmodule Postbeam.SMTP do
   defp classify(reason, :data), do: {:error, {:uncertain, reason}}
   defp classify(reason, _), do: {:error, {:retry, reason}}
 
+  @spec options(:inet.ip_address(), String.t(), Config.t()) :: keyword()
   defp options(address, host, config) do
     [
       relay: address,
@@ -156,6 +170,7 @@ defmodule Postbeam.SMTP do
     ]
   end
 
+  @spec tls_options(String.t(), Config.t()) :: keyword()
   defp tls_options(host, config) do
     Keyword.merge(
       [

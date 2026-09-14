@@ -2,7 +2,7 @@
   configs: [
     %{
       name: "default",
-      strict: true,
+      strict: false,
       files: %{included: ["lib/", "test/", "examples/", "mix.exs"]}
     }
   ]

@@ -24,7 +24,6 @@ defmodule Postbeam.Config do
           | {:dns_options, keyword()}
           | {:dkim, keyword() | nil}
           | {:key_store, Postbeam.KeyStore.adapter()}
-          | {:sent_store, Postbeam.SentStore.adapter() | nil}
           | {:resolver | :transport, module()}
   @type t :: [option()]
   @type error :: {:invalid, :config} | {:invalid_config, atom()}
@@ -40,7 +39,6 @@ defmodule Postbeam.Config do
     dns_options: [],
     dkim: nil,
     key_store: Postbeam.KeyStore.File,
-    sent_store: nil,
     resolver: Postbeam.MX,
     transport: Postbeam.SMTP
   ]
@@ -89,13 +87,16 @@ defmodule Postbeam.Config do
   def header?(value),
     do: is_binary(value) and String.valid?(value) and not Regex.match?(~r/[\x00-\x1f\x7f]/, value)
 
+  @spec label?(String.t()) :: boolean()
   defp label?(label) do
     byte_size(label) in 1..63 and
       Regex.match?(~r/\A[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\z/, label)
   end
 
+  @spec invalid_option?({atom(), term()}) :: boolean()
   defp invalid_option?({key, value}), do: not valid?(key, value)
 
+  @spec valid?(atom(), term()) :: boolean()
   defp valid?(:hostname, value), do: domain?(value)
   defp valid?(:tls, value), do: value in [:always, :if_available, :never]
   defp valid?(:port, value), do: is_integer(value) and value in 1..65_535
@@ -107,8 +108,6 @@ defmodule Postbeam.Config do
   defp valid?(:resolver, value), do: adapter?(value, :lookup, 3)
   defp valid?(:transport, value), do: adapter?(value, :deliver, 3)
   defp valid?(:key_store, value), do: Postbeam.Store.valid?(value, fetch: 2, put_new: 3)
-  defp valid?(:sent_store, nil), do: true
-  defp valid?(:sent_store, value), do: Postbeam.Store.valid?(value, put: 2)
   defp valid?(:dkim, nil), do: true
 
   defp valid?(:dkim, value) do
@@ -118,6 +117,7 @@ defmodule Postbeam.Config do
 
   defp valid?(_, _), do: false
 
+  @spec dkim_option?({atom(), term()}) :: boolean()
   defp dkim_option?({key, _}) when key in [:d, :s, :private_key], do: true
   defp dkim_option?({:a, algorithm}), do: algorithm in [:"rsa-sha256", :"ed25519-sha256"]
   defp dkim_option?({:c, {headers, :simple}}), do: headers in [:simple, :relaxed]
@@ -130,9 +130,11 @@ defmodule Postbeam.Config do
   defp dkim_option?({key, datetime}) when key in [:t, :x], do: datetime?(datetime)
   defp dkim_option?(_), do: false
 
+  @spec header_name?(term()) :: boolean()
   defp header_name?(name),
     do: is_binary(name) and Regex.match?(~r/\A[a-z0-9-]+\z/, name)
 
+  @spec datetime?(term()) :: boolean()
   defp datetime?({{year, month, day} = date, {hour, minute, second}}) do
     Enum.all?([year, month, day, hour, minute, second], &is_integer/1) and
       year >= 0 and :calendar.valid_date(date) and hour in 0..23 and minute in 0..59 and
@@ -141,12 +143,14 @@ defmodule Postbeam.Config do
 
   defp datetime?(_), do: false
 
+  @spec dkim_key?(keyword()) :: boolean()
   defp dkim_key?(options) do
     if Keyword.has_key?(options, :private_key),
       do: key?(options[:private_key]),
       else: Keyword.get(options, :a, :"rsa-sha256") == :"rsa-sha256"
   end
 
+  @spec key?(term()) :: boolean()
   defp key?({:pem_plain, pem}), do: is_binary(pem) and byte_size(pem) > 0
 
   defp key?({:pem_encrypted, pem, password}),
@@ -154,9 +158,11 @@ defmodule Postbeam.Config do
 
   defp key?(_), do: false
 
+  @spec keyword?(term()) :: boolean()
   defp keyword?(value),
     do: is_list(value) and Keyword.keyword?(value) and length(value) == map_size(Map.new(value))
 
+  @spec adapter?(term(), atom(), arity()) :: boolean()
   defp adapter?(module, function, arity),
     do:
       is_atom(module) and Code.ensure_loaded?(module) and

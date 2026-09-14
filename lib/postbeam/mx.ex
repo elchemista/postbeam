@@ -106,6 +106,7 @@ defmodule Postbeam.MX do
     end
   end
 
+  @spec minimum_ttl([tuple()]) :: non_neg_integer()
   defp minimum_ttl(answers) do
     answers
     |> Enum.map(fn answer ->
@@ -126,6 +127,7 @@ defmodule Postbeam.MX do
     end
   end
 
+  @spec route(list(), String.t()) :: {:ok, [String.t(), ...]} | {:error, routing_error()}
   defp route([], domain), do: {:ok, [domain]}
 
   defp route(records, domain) do
@@ -148,12 +150,14 @@ defmodule Postbeam.MX do
     end
   end
 
+  @spec normalize_record(term()) :: term()
   defp normalize_record({priority, host}) when is_binary(host) or is_list(host) do
     {priority, host |> to_string() |> String.replace_suffix(".", "") |> String.downcase()}
   end
 
   defp normalize_record(record), do: record
 
+  @spec valid_record?(term()) :: boolean()
   defp valid_record?({priority, host}),
     do: is_integer(priority) and priority in 0..65_535 and Config.domain?(host)
 
