@@ -399,6 +399,13 @@ defmodule Postbeam.InboundTest do
 
   test "listeners have independent adapters and stop with their supervisor" do
     {name, port} = listener([], adapter: TestInboundAdapter)
+    %{pid: listener_pid} = :ranch.info(name)
+    monitor = Process.monitor(listener_pid)
+
+    {other_name, other_port} =
+      listener(message_result: {:error, {:permanent, "Other listener policy"}})
+
+    other_socket = connect(other_port)
     socket = connect(port)
     envelope(socket)
     send_data(socket)
@@ -407,7 +414,14 @@ defmodule Postbeam.InboundTest do
     assert command(socket, "UNKNOWN") =~ "500 "
     assert command(socket, "QUIT") =~ "221 "
     assert :ok = stop_supervised({Inbound, name})
-    assert {:error, :econnrefused} = :gen_tcp.connect({127, 0, 0, 1}, port, [], 500)
+
+    # A released ephemeral port may immediately belong to another parallel test.
+    # Observe the original process instead of reconnecting to its former port.
+    assert_receive {:DOWN, ^monitor, :process, ^listener_pid, :shutdown}
+    assert :ranch.info(other_name).status == :running
+    envelope(other_socket)
+    send_data(other_socket)
+    assert reply(other_socket) =~ "550 5.7.1 Other listener policy"
   end
 
   test "start_link supports a linked IPv6 listener" do
