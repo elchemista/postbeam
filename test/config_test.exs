@@ -13,6 +13,7 @@ defmodule Postbeam.ConfigTest do
 
     Application.put_env(:postbeam, :hostname, "global.example.com")
     Application.put_env(:postbeam, :tls, :always)
+    Application.put_env(:postbeam, :max_outbound_connections, 32)
 
     Application.put_env(:postbeam, :dkim,
       d: "example.com",
@@ -26,6 +27,10 @@ defmodule Postbeam.ConfigTest do
     assert id =~ "@global.example.com>"
     assert_receive {:attempt, _, _, config}
     assert config[:tls] == :always
+    refute Keyword.has_key?(config, :max_outbound_connections)
+
+    assert {:error, {:invalid_config, :max_outbound_connections}} =
+             Postbeam.Config.new(max_outbound_connections: 10)
 
     assert {:ok, %{message_id: id}} =
              Postbeam.deliver(message, options ++ [hostname: "call.example.com"])

@@ -29,7 +29,7 @@ defmodule Postbeam.MIME do
     {type, subtype, _, params, body} = content(message)
     mime = {type, subtype, headers, params, body}
     options = if config[:dkim], do: [dkim: config[:dkim]], else: []
-    {:ok, %{message | data: :mimemail.encode(mime, options), message_id: id}}
+    {:ok, %{message | data: Postbeam.SMTP.MIME.encode(mime, options), message_id: id}}
   rescue
     # Encoder and crypto exception arguments can contain content or private keys.
     error -> {:error, {:composition, error.__struct__}}

@@ -1,7 +1,11 @@
 # Postbeam
 
 Send email directly to recipient MX servers from Elixir, with optional Swoosh
-support. Includes TLS, DKIM, text/HTML bodies and Swoosh attachments.
+support. Includes TLS, DKIM, text/HTML bodies and Swoosh attachments. Receive
+email through an optional SMTP listener with your own handling adapter.
+
+The SMTP/LMTP engine, MIME codec and DKIM signer are included as native Elixir
+modules under `Postbeam.SMTP`. Postbeam does not depend on `gen_smtp`.
 
 ## Install
 
@@ -48,9 +52,29 @@ To, Cc, Bcc, Reply-To, HTML, attachments and inline images are supported.
 
 - [Configuration and TLS](docs/configuration.md)
 - [Delivery results and retry decisions](docs/delivery.md)
+- [Receive email with your own adapter](docs/inbound.md)
 - [DKIM keys](docs/dkim.md)
 - [Custom DNS and transport adapters](docs/adapters.md)
+- [Native SMTP engine and low-level APIs](docs/smtp.md)
 
 Delivery is synchronous. Background jobs, retries over time and storage belong
 to your application. Mailboxes must be ASCII; use punycode for international
 domains. Display names, subjects and bodies support Unicode.
+
+## Receive
+
+Implement `Postbeam.Inbound` with `accept_recipient/2` and `handle_message/2`,
+then add the listener to your application's supervision tree:
+
+```elixir
+{Postbeam.Inbound,
+ adapter: {MyApp.IncomingMail, []},
+ hostname: "mx.example.com",
+ address: {0, 0, 0, 0},
+ port: 25}
+```
+
+The adapter receives the raw MIME message and SMTP envelope, and decides whether
+to call an API, save to a database or handle the email another way. Postbeam has
+no built-in message storage. Return `:ok` to accept, or a temporary/permanent
+error to reject. [Complete adapter example and setup](docs/inbound.md).

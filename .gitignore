@@ -6,5 +6,7 @@
 /.env
 /priv/keys/
 *.pem
+!/test/smtp/fixtures/*.pem
+/src/*.erl
 erl_crash.dump
 postbeam-*.tar

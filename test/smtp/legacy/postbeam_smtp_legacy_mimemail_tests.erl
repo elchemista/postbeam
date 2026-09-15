@@ -1,0 +1,1981 @@
+%%% Copyright 2009 Andrew Thompson <andrew@hijacked.us>. All rights reserved.
+%%%
+%%% Redistribution and use in source and binary forms, with or without
+%%% modification, are permitted provided that the following conditions are met:
+%%%
+%%%   1. Redistributions of source code must retain the above copyright notice,
+%%%      this list of conditions and the following disclaimer.
+%%%   2. Redistributions in binary form must reproduce the above copyright
+%%%      notice, this list of conditions and the following disclaimer in the
+%%%      documentation and/or other materials provided with the distribution.
+%%%
+%%% THIS SOFTWARE IS PROVIDED BY THE FREEBSD PROJECT ``AS IS'' AND ANY EXPRESS OR
+%%% IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+%%% MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
+%%% EVENT SHALL THE FREEBSD PROJECT OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+%%% INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+%%% (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+%%% LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+%%% ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+%%% (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+%%% SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+%% @doc A module for decoding/encoding MIME 1.0 email.
+%% The encoder and decoder operate on the same data structure, which is as follows:
+%% A 5-tuple with the following elements: `{Type, SubType, Headers, Parameters, Body}'.
+%%
+%% `Type' and `SubType' are the MIME type of the email, examples are `text/plain' or
+%% `multipart/alternative'. The decoder splits these into 2 fields so you can filter by
+%% the main type or by the subtype.
+%%
+%% `Headers' consists of a list of key/value pairs of binary values eg.
+%% `{<<"From">>, <<"Andrew Thompson <andrew@hijacked.us>">>}'. There is no parsing of
+%% the header aside from un-wrapping the lines and splitting the header name from the
+%% header value.
+%%
+%% `Parameters' is a list of 3 key/value tuples. The 3 keys are `<<"content-type-params">>',
+%% `<<"disposition">>' and `<<"disposition-params">>'.
+%% `content-type-params' is a key/value list of parameters on the content-type header, this
+%% usually consists of things like charset and the format parameters. `disposition' indicates
+%% how the data wants to be displayed, this is usually 'inline'. `disposition-params' is a list of
+%% disposition information, eg. the filename this section should be saved as, the modification
+%% date the file should be saved with, etc.
+%%
+%% Finally, `Body' can be one of several different types, depending on the structure of the email.
+%% For a simple email, the body will usually be a binary consisting of the message body, In the
+%% case of a multipart email, its a list of these 5-tuple MIME structures. The third possibility,
+%% in the case of a message/rfc822 attachment, body can be a single 5-tuple MIME structure.
+%%
+%% You should see the relevant RFCs (2045, 2046, 2047, etc.) for more information.
+%%
+%% Note that parts of this module (e.g., `decode/2') use the
+%% <a href="https://hex.pm/packages/iconv"><tt>iconv</tt></a> library for string conversion,
+%% which you will need to explicitly list as a dependency.
+
+-module(postbeam_smtp_legacy_mimemail_tests).
+-include_lib("eunit/include/eunit.hrl").
+-include_lib("kernel/include/logger.hrl").
+-define(LOGGER_META, #{domain => [postbeam]}).
+-define(DEFAULT_MIME_VERSION, <<"1.0">>).
+-define(DEFAULT_OPTIONS, [
+    % default encoding is utf-8 if we can find the iconv module
+    {encoding, get_default_encoding()},
+    % should we decode any base64/quoted printable attachments?
+    {decode_attachments, true},
+    % should we assume default mime version
+    {allow_missing_version, true},
+    % default mime version
+    {default_mime_version, ?DEFAULT_MIME_VERSION}
+]).
+-define(is_rfc2047_q_allowed(C),
+    (C =:= $\s orelse (C >= $a andalso C =< $z) orelse (C >= $A andalso C =< $Z) orelse
+        (C >= $0 andalso C =< $9) orelse C =:= $! orelse C =:= $* orelse C =:= $+ orelse
+        C =:= $- orelse C =:= $/)
+).
+decode(A1) -> 'Elixir.Postbeam.SMTP.MIME':decode(A1).
+decode_body(A1, A2, A3, A4) -> 'Elixir.Postbeam.SMTP.MIME':decode_body(A1, A2, A3, A4).
+decode_header(A1, A2) -> 'Elixir.Postbeam.SMTP.MIME':decode_header(A1, A2).
+decode_quoted_printable(A1) -> 'Elixir.Postbeam.SMTP.MIME':decode_quoted_printable(A1).
+dkim_canonicalize_body(A1, A2) -> 'Elixir.Postbeam.SMTP.DKIM':canonicalize_body(A1, A2).
+dkim_canonicalize_headers(A1, A2) -> 'Elixir.Postbeam.SMTP.DKIM':canonicalize_headers(A1, A2).
+ed25519_supported() -> 'Elixir.Postbeam.SMTP.DKIM':ed25519_supported().
+encode(A1) -> 'Elixir.Postbeam.SMTP.MIME':encode(A1).
+encode(A1, A2) -> 'Elixir.Postbeam.SMTP.MIME':encode(A1, A2).
+encode_parameters(A1) -> 'Elixir.Postbeam.SMTP.MIME':encode_parameters(A1).
+encode_quoted_printable(A1) -> 'Elixir.Postbeam.SMTP.MIME':encode_quoted_printable(A1).
+has_lines_over_998(A1) -> 'Elixir.Postbeam.SMTP.MIME':has_lines_over_998(A1).
+parse_content_disposition(A1) -> 'Elixir.Postbeam.SMTP.MIME':parse_content_disposition(A1).
+parse_content_type(A1) -> 'Elixir.Postbeam.SMTP.MIME':parse_content_type(A1).
+parse_headers(A1) -> 'Elixir.Postbeam.SMTP.MIME':parse_headers(A1).
+parse_with_comments(A1) -> 'Elixir.Postbeam.SMTP.MIME':parse_with_comments(A1).
+rfc2047_utf8_encode(A1) -> 'Elixir.Postbeam.SMTP.MIME':rfc2047_utf8_encode(A1).
+rfc2047_utf8_encode(A1, A2, A3, A4, A5) -> 'Elixir.Postbeam.SMTP.MIME':rfc2047_utf8_encode(A1, A2, A3, A4, A5).
+split_body_by_boundary_(A1, A2, A3, A4) -> 'Elixir.Postbeam.SMTP.MIME':split_body_by_boundary_(A1, A2, A3, A4).
+valid_7bit(A1) -> 'Elixir.Postbeam.SMTP.MIME':valid_7bit(A1).
+
+
+parse_with_comments_test_() ->
+    [
+        {"bleh", fun() ->
+            ?assertEqual(<<"1.0">>, parse_with_comments(<<"1.0">>)),
+            ?assertEqual(<<"1.0">>, parse_with_comments(<<"1.0  (produced by MetaSend Vx.x)">>)),
+            ?assertEqual(<<"1.0">>, parse_with_comments(<<"(produced by MetaSend Vx.x) 1.0">>)),
+            ?assertEqual(<<"1.0">>, parse_with_comments(<<"1.(produced by MetaSend Vx.x)0">>))
+        end},
+        {"comments that parse as empty", fun() ->
+            ?assertEqual(<<>>, parse_with_comments(<<"(comment (nested (deeply)) (and (oh no!) again))">>)),
+            ?assertEqual(<<>>, parse_with_comments(<<"(\\)\\\\)">>)),
+            ?assertEqual(<<>>, parse_with_comments(<<"(by way of Whatever <redir@my.org>)    (generated by Eudora)">>))
+        end},
+        {"some more", fun() ->
+            ?assertEqual(
+                <<":sysmail@  group. org, Muhammed. Ali @Vegas.WBA">>,
+                parse_with_comments(<<"\":sysmail\"@  group. org, Muhammed.(the greatest) Ali @(the)Vegas.WBA">>)
+            ),
+            ?assertEqual(
+                <<"Pete <pete@silly.test>">>,
+                parse_with_comments(<<"Pete(A wonderful \\) chap) <pete(his account)@silly.test(his host)>">>)
+            )
+        end},
+        {"non list values", fun() ->
+            ?assertEqual(undefined, parse_with_comments(undefined)),
+            ?assertEqual(17, parse_with_comments(17))
+        end},
+        {"Parens within quotes ignored", fun() ->
+            ?assertEqual(<<"Height (from xkcd).eml">>, parse_with_comments(<<"\"Height (from xkcd).eml\"">>)),
+            ?assertEqual(<<"Height (from xkcd).eml">>, parse_with_comments(<<"\"Height \(from xkcd\).eml\"">>))
+        end},
+        {"Escaped quotes are handled correctly", fun() ->
+            ?assertEqual(<<"Hello \"world\"">>, parse_with_comments(<<"Hello \\\"world\\\"">>)),
+            ?assertEqual(
+                <<"<boss@nil.test>, Giant; \"Big\" Box <sysservices@example.net>">>,
+                parse_with_comments(<<"<boss@nil.test>, \"Giant; \\\"Big\\\" Box\" <sysservices@example.net>">>)
+            )
+        end},
+        {"backslash not part of a quoted pair", fun() ->
+            ?assertEqual(<<"AC \\ DC">>, parse_with_comments(<<"AC \\ DC">>)),
+            ?assertEqual(<<"AC  DC">>, parse_with_comments(<<"AC ( \\ ) DC">>))
+        end},
+        {"Unterminated quotes or comments", fun() ->
+            ?assertError(unterminated_quotes, parse_with_comments(<<"\"Hello there ">>)),
+            ?assertError(unterminated_quotes, parse_with_comments(<<"\"Hello there \\\"">>)),
+            ?assertError(unterminated_comment, parse_with_comments(<<"(Hello there ">>)),
+            ?assertError(unterminated_comment, parse_with_comments(<<"(Hello there \\\)">>))
+        end}
+    ].
+
+parse_content_type_test_() ->
+    [
+        {"parsing content types", fun() ->
+            ?assertEqual(
+                {<<"text">>, <<"plain">>, [{<<"charset">>, <<"us-ascii">>}]},
+                parse_content_type(<<"text/plain; charset=us-ascii (Plain text)">>)
+            ),
+            ?assertEqual(
+                {<<"text">>, <<"plain">>, [{<<"charset">>, <<"us-ascii">>}]},
+                parse_content_type(<<"text/plain; charset=\"us-ascii\"">>)
+            ),
+            ?assertEqual(
+                {<<"text">>, <<"plain">>, [{<<"charset">>, <<"us-ascii">>}]},
+                parse_content_type(<<"Text/Plain; Charset=\"us-ascii\"">>)
+            ),
+            ?assertEqual(
+                {<<"multipart">>, <<"mixed">>, [{<<"boundary">>, <<"----_=_NextPart_001_01C9DCAE.1F2CB390">>}]},
+                parse_content_type(<<"multipart/mixed; boundary=\"----_=_NextPart_001_01C9DCAE.1F2CB390\"">>)
+            )
+        end},
+        {"parsing content type with a tab in it", fun() ->
+            ?assertEqual(
+                {<<"text">>, <<"plain">>, [{<<"charset">>, <<"us-ascii">>}]},
+                parse_content_type(<<"text/plain;\tcharset=us-ascii">>)
+            ),
+            ?assertEqual(
+                {<<"text">>, <<"plain">>, [{<<"charset">>, <<"us-ascii">>}, {<<"foo">>, <<"bar">>}]},
+                parse_content_type(<<"text/plain;\tcharset=us-ascii;\tfoo=bar">>)
+            )
+        end},
+        {"invalid content types", fun() ->
+            ?assertThrow(bad_content_type, parse_content_type(<<"text\\plain; charset=us-ascii">>)),
+            ?assertThrow(bad_content_type, parse_content_type(<<"text/plain; charset us-ascii">>))
+        end}
+    ].
+
+parse_content_disposition_test_() ->
+    [
+        {"parsing valid dispositions", fun() ->
+            ?assertEqual({<<"inline">>, []}, parse_content_disposition(<<"inline">>)),
+            ?assertEqual({<<"inline">>, []}, parse_content_disposition(<<"inline;">>)),
+            ?assertEqual(
+                {<<"attachment">>, [
+                    {<<"filename">>, <<"genome.jpeg">>},
+                    {<<"modification-date">>, <<"Wed, 12 Feb 1997 16:29:51 -0500">>}
+                ]},
+                parse_content_disposition(
+                    <<"attachment; filename=genome.jpeg;modification-date=\"Wed, 12 Feb 1997 16:29:51 -0500\";">>
+                )
+            ),
+            ?assertEqual(
+                {<<"text/plain">>, [{<<"charset">>, <<"us-ascii">>}]},
+                parse_content_disposition(<<"text/plain; charset=us-ascii (Plain text)">>)
+            )
+        end},
+        {"invalid dispositions", fun() ->
+            ?assertThrow(bad_disposition, parse_content_disposition(<<"inline; =bar">>)),
+            ?assertThrow(bad_disposition, parse_content_disposition(<<"inline; bar">>))
+        end}
+    ].
+
+various_parsing_test_() ->
+    [
+        {"split_body_by_boundary test", fun() ->
+            ?assertEqual(
+                [{[], <<"foo bar baz">>}], split_body_by_boundary_(<<"stuff\r\nfoo bar baz">>, <<"--bleh">>, [], [])
+            ),
+            ?assertEqual(
+                [{[], <<"foo\r\n">>}, {[], <<>>}, {[], <<>>}, {[], <<"bar baz">>}],
+                split_body_by_boundary_(
+                    <<"stuff\r\nfoo\r\n--bleh\r\n--bleh\r\n--bleh-- stuff\r\nbar baz">>, <<"--bleh">>, [], []
+                )
+            ),
+            %?assertEqual([{[], []}, {[], []}, {[], "bar baz"}], split_body_by_boundary_("\r\n--bleh\r\n--bleh\r\n", "--bleh", [], [])),
+            %?assertMatch([{"text", "plain", [], _,"foo\r\n"}], split_body_by_boundary("stuff\r\nfoo\r\n--bleh\r\n--bleh\r\n--bleh-- stuff\r\nbar baz", "--bleh", "1.0", []))
+            ?assertEqual({[], <<"foo: bar\r\n">>}, parse_headers(<<"\r\nfoo: bar\r\n">>)),
+            ?assertEqual({[{<<"foo">>, <<"barbaz">>}], <<>>}, parse_headers(<<"foo: bar\r\n baz\r\n">>)),
+            ?assertEqual({[], <<" foo bar baz\r\nbam">>}, parse_headers(<<"\sfoo bar baz\r\nbam">>)),
+            ok
+        end},
+        {"Headers with non-ASCII characters", fun() ->
+            ?assertEqual({[{<<"foo">>, <<"bar ?? baz">>}], <<>>}, parse_headers(<<"foo: bar ø baz\r\n"/utf8>>)),
+            ?assertEqual({[], <<"bär: bar baz\r\n"/utf8>>}, parse_headers(<<"bär: bar baz\r\n"/utf8>>))
+        end},
+        {"Headers with tab characters", fun() ->
+            ?assertEqual({[{<<"foo">>, <<"bar		baz">>}], <<>>}, parse_headers(<<"foo: bar		baz\r\n">>))
+        end}
+    ].
+
+-define(IMAGE_MD5, <<110, 130, 37, 247, 39, 149, 224, 61, 114, 198, 227, 138, 113, 4, 198, 60>>).
+
+parse_example_mails_test_() ->
+    Getmail = fun(File) ->
+        {ok, Email} = file:read_file(string:concat("test/smtp/fixtures/", File)),
+        %Email = binary_to_list(Bin),
+        decode(Email)
+    end,
+    [
+        {"parse a plain text email", fun() ->
+            Decoded = Getmail("Plain-text-only.eml"),
+            ?assertEqual(5, tuple_size(Decoded)),
+            {Type, SubType, _Headers, _Properties, Body} = Decoded,
+            ?assertEqual({<<"text">>, <<"plain">>}, {Type, SubType}),
+            ?assertEqual(<<"This message contains only plain text.\r\n">>, Body)
+        end},
+        {"parse a Python smtplib plain text email", fun() ->
+            Decoded = Getmail("python-smtp-lib.eml"),
+            ?assertEqual(5, tuple_size(Decoded)),
+            {Type, SubType, _Headers, _Properties, Body} = Decoded,
+            ?assertEqual({<<"text">>, <<"plain">>}, {Type, SubType}),
+            ?assertEqual(<<"Hello world Python.\r\n">>, Body)
+        end},
+        {"parse a plain text email with no content type", fun() ->
+            Decoded = Getmail("Plain-text-only-no-content-type.eml"),
+            ?assertEqual(5, tuple_size(Decoded)),
+            {Type, SubType, _Headers, _Properties, Body} = Decoded,
+            ?assertEqual({<<"text">>, <<"plain">>}, {Type, SubType}),
+            ?assertEqual(<<"This message contains only plain text.\r\n">>, Body)
+        end},
+        {"parse a plain text email with no MIME header", fun() ->
+            {Type, SubType, _Headers, _Properties, Body} =
+                Getmail("Plain-text-only-no-MIME.eml"),
+            ?assertEqual({<<"text">>, <<"plain">>}, {Type, SubType}),
+            ?assertEqual(<<"This message contains only plain text.\r\n">>, Body)
+        end},
+        {"parse an email that says it is multipart but contains no boundaries", fun() ->
+            ?assertError(missing_boundary, Getmail("Plain-text-only-with-boundary-header.eml"))
+        end},
+        {"parse a multipart email with no MIME header", fun() ->
+            % We now insert a default Mime for missing Mime headers
+            % ?assertError(non_mime_multipart, Getmail("rich-text-no-MIME.eml"))
+            ?assertMatch(
+                {<<"multipart">>, <<"alternative">>, _, _, [
+                    {<<"text">>, <<"plain">>, _, _, _}, {<<"text">>, <<"html">>, _, _, _}
+                ]},
+                Getmail("rich-text-no-MIME.eml")
+            )
+        end},
+        {"rich text", fun() ->
+            %% pardon my naming here.  apparently 'rich text' in mac mail
+            %% means 'html'.
+            Decoded = Getmail("rich-text.eml"),
+            ?assertEqual(5, tuple_size(Decoded)),
+            {Type, SubType, _Headers, _Properties, Body} = Decoded,
+            ?assertEqual({<<"multipart">>, <<"alternative">>}, {Type, SubType}),
+            ?assertEqual(2, length(Body)),
+            [Plain, Html] = Body,
+            ?assertEqual({5, 5}, {tuple_size(Plain), tuple_size(Html)}),
+            ?assertMatch({<<"text">>, <<"plain">>, _, _, <<"This message contains rich text.">>}, Plain),
+            ?assertMatch(
+                {<<"text">>, <<"html">>, _, _,
+                    <<"<html><body style=\"word-wrap: break-word; -webkit-nbsp-mode: space; -webkit-line-break: after-white-space; \"><b>This </b><i>message </i><span class=\"Apple-style-span\" style=\"text-decoration: underline;\">contains </span>rich text.</body></html>">>},
+                Html
+            )
+        end},
+        {"rich text no boundary", fun() ->
+            ?assertError(no_boundary, Getmail("rich-text-no-boundary.eml"))
+        end},
+        {"rich text missing first boundary", fun() ->
+            % TODO - should we handle this more elegantly?
+            Decoded = Getmail("rich-text-missing-first-boundary.eml"),
+            ?assertEqual(5, tuple_size(Decoded)),
+            {Type, SubType, _Headers, _Properties, Body} = Decoded,
+            ?assertEqual({<<"multipart">>, <<"alternative">>}, {Type, SubType}),
+            ?assertEqual(1, length(Body)),
+            [Html] = Body,
+            ?assertEqual(5, tuple_size(Html)),
+            ?assertMatch(
+                {<<"text">>, <<"html">>, _, _,
+                    <<"<html><body style=\"word-wrap: break-word; -webkit-nbsp-mode: space; -webkit-line-break: after-white-space; \"><b>This </b><i>message </i><span class=\"Apple-style-span\" style=\"text-decoration: underline;\">contains </span>rich text.</body></html>">>},
+                Html
+            )
+        end},
+        {"rich text missing last boundary", fun() ->
+            ?assertError(missing_last_boundary, Getmail("rich-text-missing-last-boundary.eml"))
+        end},
+        {"rich text wrong last boundary", fun() ->
+            ?assertError(missing_last_boundary, Getmail("rich-text-broken-last-boundary.eml"))
+        end},
+        {"rich text missing text content type", fun() ->
+            %% pardon my naming here.  apparently 'rich text' in mac mail
+            %% means 'html'.
+            Decoded = Getmail("rich-text-no-text-contenttype.eml"),
+            ?assertEqual(5, tuple_size(Decoded)),
+            {Type, SubType, _Headers, _Properties, Body} = Decoded,
+            ?assertEqual({<<"multipart">>, <<"alternative">>}, {Type, SubType}),
+            ?assertEqual(2, length(Body)),
+            [Plain, Html] = Body,
+            ?assertEqual({5, 5}, {tuple_size(Plain), tuple_size(Html)}),
+            ?assertMatch({<<"text">>, <<"plain">>, _, _, <<"This message contains rich text.">>}, Plain),
+            ?assertMatch(
+                {<<"text">>, <<"html">>, _, _,
+                    <<"<html><body style=\"word-wrap: break-word; -webkit-nbsp-mode: space; -webkit-line-break: after-white-space; \"><b>This </b><i>message </i><span class=\"Apple-style-span\" style=\"text-decoration: underline;\">contains </span>rich text.</body></html>">>},
+                Html
+            )
+        end},
+        {"text attachment only", fun() ->
+            Decoded = Getmail("text-attachment-only.eml"),
+            ?assertEqual(5, tuple_size(Decoded)),
+            {Type, SubType, _Headers, _Properties, Body} = Decoded,
+            ?assertEqual({<<"multipart">>, <<"mixed">>}, {Type, SubType}),
+            ?assertEqual(1, length(Body)),
+            Rich =
+                <<"{\\rtf1\\ansi\\ansicpg1252\\cocoartf949\\cocoasubrtf460\r\n{\\fonttbl\\f0\\fswiss\\fcharset0 Helvetica;}\r\n{\\colortbl;\\red255\\green255\\blue255;}\r\n\\margl1440\\margr1440\\vieww9000\\viewh8400\\viewkind0\r\n\\pard\\tx720\\tx1440\\tx2160\\tx2880\\tx3600\\tx4320\\tx5040\\tx5760\\tx6480\\tx7200\\tx7920\\tx8640\\ql\\qnatural\\pardirnatural\r\n\r\n\\f0\\fs24 \\cf0 This is a basic rtf file.}">>,
+            ?assertMatch([{<<"text">>, <<"rtf">>, _, _, Rich}], Body)
+        end},
+        {"image attachment only", fun() ->
+            Decoded = Getmail("image-attachment-only.eml"),
+            ?assertEqual(5, tuple_size(Decoded)),
+            {Type, SubType, _Headers, _Properties, Body} = Decoded,
+            ?assertEqual({<<"multipart">>, <<"mixed">>}, {Type, SubType}),
+            ?assertEqual(1, length(Body)),
+            ?assertMatch([{<<"image">>, <<"jpeg">>, _, _, _}], Body),
+            [H | _] = Body,
+            [{<<"image">>, <<"jpeg">>, _, Parameters, _Image}] = Body,
+            ?assertEqual(?IMAGE_MD5, erlang:md5(element(5, H))),
+            ?assertEqual(<<"inline">>, maps:get(disposition, Parameters)),
+            ?assertEqual(
+                <<"chili-pepper.jpg">>, proplists:get_value(<<"filename">>, maps:get(disposition_params, Parameters))
+            ),
+            ?assertEqual(
+                <<"chili-pepper.jpg">>, proplists:get_value(<<"name">>, maps:get(content_type_params, Parameters))
+            )
+        end},
+        {"message attachment only", fun() ->
+            Decoded = Getmail("message-as-attachment.eml"),
+            ?assertMatch({<<"multipart">>, <<"mixed">>, _, _, _}, Decoded),
+            [Body] = element(5, Decoded),
+            ?assertMatch({<<"message">>, <<"rfc822">>, _, _, _}, Body),
+            Subbody = element(5, Body),
+            ?assertMatch({<<"text">>, <<"plain">>, _, _, _}, Subbody),
+            ?assertEqual(<<"This message contains only plain text.\r\n">>, element(5, Subbody))
+        end},
+        {"message, image, and rtf attachments.", fun() ->
+            Decoded = Getmail("message-image-text-attachments.eml"),
+            ?assertMatch({<<"multipart">>, <<"mixed">>, _, _, _}, Decoded),
+            ?assertEqual(3, length(element(5, Decoded))),
+            [Message, Rtf, Image] = element(5, Decoded),
+            ?assertMatch({<<"message">>, <<"rfc822">>, _, _, _}, Message),
+            Submessage = element(5, Message),
+            ?assertMatch({<<"text">>, <<"plain">>, _, _, <<"This message contains only plain text.\r\n">>}, Submessage),
+
+            ?assertMatch({<<"text">>, <<"rtf">>, _, _, _}, Rtf),
+            ?assertEqual(
+                <<"{\\rtf1\\ansi\\ansicpg1252\\cocoartf949\\cocoasubrtf460\r\n{\\fonttbl\\f0\\fswiss\\fcharset0 Helvetica;}\r\n{\\colortbl;\\red255\\green255\\blue255;}\r\n\\margl1440\\margr1440\\vieww9000\\viewh8400\\viewkind0\r\n\\pard\\tx720\\tx1440\\tx2160\\tx2880\\tx3600\\tx4320\\tx5040\\tx5760\\tx6480\\tx7200\\tx7920\\tx8640\\ql\\qnatural\\pardirnatural\r\n\r\n\\f0\\fs24 \\cf0 This is a basic rtf file.}">>,
+                element(5, Rtf)
+            ),
+
+            ?assertMatch({<<"image">>, <<"jpeg">>, _, _, _}, Image),
+            ?assertEqual(?IMAGE_MD5, erlang:md5(element(5, Image)))
+        end},
+        {"alternative text/html with calendar attachment.", fun() ->
+            Decoded = Getmail("message-text-html-attachment.eml"),
+            ?assertMatch(
+                {<<"multipart">>, <<"mixed">>, _, _, [
+                    {<<"multipart">>, <<"alternative">>, _, _, [
+                        {<<"text">>, <<"plain">>, _, _, _},
+                        {<<"text">>, <<"html">>, _, _, _}
+                    ]},
+                    {<<"text">>, <<"calendar">>, _, _, _}
+                ]},
+                Decoded
+            )
+        end},
+        {"Outlook 2007 with leading tabs in quoted-printable.", fun() ->
+            Decoded = Getmail("outlook-2007.eml"),
+            ?assertMatch({<<"multipart">>, <<"alternative">>, _, _, _}, Decoded)
+        end},
+        {"The gamut", fun() ->
+            % multipart/alternative
+            %	text/plain
+            %	multipart/mixed
+            %		text/html
+            %		message/rf822
+            %			multipart/mixed
+            %				message/rfc822
+            %					text/plain
+            %		text/html
+            %		message/rtc822
+            %			text/plain
+            %		text/html
+            %		image/jpeg
+            %		text/html
+            %		text/rtf
+            %		text/html
+            Decoded = Getmail("the-gamut.eml"),
+            ?assertMatch({<<"multipart">>, <<"alternative">>, _, _, _}, Decoded),
+            ?assertEqual(2, length(element(5, Decoded))),
+            [Toptext, Topmultipart] = element(5, Decoded),
+            ?assertMatch({<<"text">>, <<"plain">>, _, _, _}, Toptext),
+            ?assertEqual(
+                <<"This is rich text.\r\n\r\nThe list is html.\r\n\r\nAttchments:\r\nan email containing an attachment of an email.\r\nan email of only plain text.\r\nan image\r\nan rtf file.\r\n">>,
+                element(5, Toptext)
+            ),
+            ?assertEqual(9, length(element(5, Topmultipart))),
+            [Html, Messagewithin, Brhtml, _Message, Brhtml, Image, Brhtml, Rtf, Brhtml] = element(5, Topmultipart),
+            ?assertMatch({<<"text">>, <<"html">>, _, _, _}, Html),
+            ?assertEqual(
+                <<"<html><body style=\"word-wrap: break-word; -webkit-nbsp-mode: space; -webkit-line-break: after-white-space; \"><b>This</b> is <i>rich</i> text.<div><br></div><div>The list is html.</div><div><br></div><div>Attchments:</div><div><ul class=\"MailOutline\"><li>an email containing an attachment of an email.</li><li>an email of only plain text.</li><li>an image</li><li>an rtf file.</li></ul></div><div></div></body></html>">>,
+                element(5, Html)
+            ),
+
+            ?assertMatch({<<"message">>, <<"rfc822">>, _, _, _}, Messagewithin),
+            %?assertEqual(1, length(element(5, Messagewithin))),
+            ?assertMatch(
+                {<<"multipart">>, <<"mixed">>, _, _, [
+                    {<<"message">>, <<"rfc822">>, _, _,
+                        {<<"text">>, <<"plain">>, _, _, <<"This message contains only plain text.\r\n">>}}
+                ]},
+                element(5, Messagewithin)
+            ),
+
+            ?assertMatch({<<"image">>, <<"jpeg">>, _, _, _}, Image),
+            ?assertEqual(?IMAGE_MD5, erlang:md5(element(5, Image))),
+
+            ?assertMatch({<<"text">>, <<"rtf">>, _, _, _}, Rtf),
+            ?assertEqual(
+                <<"{\\rtf1\\ansi\\ansicpg1252\\cocoartf949\\cocoasubrtf460\r\n{\\fonttbl\\f0\\fswiss\\fcharset0 Helvetica;}\r\n{\\colortbl;\\red255\\green255\\blue255;}\r\n\\margl1440\\margr1440\\vieww9000\\viewh8400\\viewkind0\r\n\\pard\\tx720\\tx1440\\tx2160\\tx2880\\tx3600\\tx4320\\tx5040\\tx5760\\tx6480\\tx7200\\tx7920\\tx8640\\ql\\qnatural\\pardirnatural\r\n\r\n\\f0\\fs24 \\cf0 This is a basic rtf file.}">>,
+                element(5, Rtf)
+            )
+        end},
+        {"Plain text and 2 identical attachments", fun() ->
+            Decoded = Getmail("plain-text-and-two-identical-attachments.eml"),
+            ?assertMatch({<<"multipart">>, <<"mixed">>, _, _, _}, Decoded),
+            ?assertEqual(3, length(element(5, Decoded))),
+            [Plain, Attach1, Attach2] = element(5, Decoded),
+            ?assertEqual(Attach1, Attach2),
+            ?assertMatch({<<"text">>, <<"plain">>, _, _, _}, Plain),
+            ?assertEqual(<<"This message contains only plain text.\r\n">>, element(5, Plain))
+        end},
+        {"no \\r\\n before first boundary", fun() ->
+            {ok, Bin} = file:read_file("test/smtp/fixtures/html.eml"),
+            Decoded = decode(Bin),
+            ?assertEqual(2, length(element(5, Decoded)))
+        end},
+        {"permissive malformed folded multibyte header decoder", fun() ->
+            {_, _, Headers, _, Body} = Getmail("malformed-folded-multibyte-header.eml"),
+            ?assertEqual(<<"Hello world\n">>, Body),
+            Subject =
+                <<78, 79, 68, 51, 50, 32, 83, 109, 97, 114, 116, 32, 83, 101, 99, 117, 114, 105, 116, 121, 32, 45, 32,
+                    208, 177, 208, 181, 209, 129, 208, 191, 208, 187, 208, 176, 209, 130, 208, 189, 208, 176, 209, 143,
+                    32, 208, 187, 208, 184, 209, 134, 208, 181, 208, 189, 208, 183, 208, 184, 209, 143>>,
+            ?assertEqual(Subject, proplists:get_value(<<"Subject">>, Headers))
+        end},
+        {"decode headers of multipart messages", fun() ->
+            {<<"multipart">>, _, _, _, [Inline, Attachment]} = Getmail("utf-attachment-name.eml"),
+            {<<"text">>, _, _, _, InlineBody} = Inline,
+            {<<"text">>, _, _, ContentHeaders, _AttachmentBody} = Attachment,
+            ContentTypeName = proplists:get_value(
+                <<"name">>,
+                maps:get(
+                    content_type_params, ContentHeaders
+                )
+            ),
+            DispositionName = proplists:get_value(
+                <<"filename">>,
+                maps:get(
+                    disposition_params, ContentHeaders
+                )
+            ),
+
+            ?assertEqual(<<"Hello\r\n">>, InlineBody),
+            ?assert(ContentTypeName == DispositionName),
+            % Take the filename as a literal, to prevent character set issues with Erlang
+            % In utf-8 the filename is:"тестовый файл.txt"
+            Filename =
+                <<209, 130, 208, 181, 209, 129, 209, 130, 208, 190, 208, 178, 209, 139, 208, 185, 32, 209, 132, 208,
+                    176, 208, 185, 208, 187, 46, 116, 120, 116>>,
+            ?assertEqual(Filename, ContentTypeName),
+            ?assertEqual(Filename, DispositionName)
+        end},
+        {"testcase1", fun() ->
+            Multipart = <<"multipart">>,
+            Alternative = <<"alternative">>,
+            Related = <<"related">>,
+            Mixed = <<"mixed">>,
+            Text = <<"text">>,
+            Html = <<"html">>,
+            Plain = <<"plain">>,
+            Message = <<"message">>,
+            Ref822 = <<"rfc822">>,
+            Image = <<"image">>,
+            Jpeg = <<"jpeg">>,
+            %Imagemd5 = <<69,175,198,78,52,72,6,233,147,22,50,137,128,180,169,50>>,
+            Imagemd5 = <<179, 151, 42, 139, 78, 14, 182, 78, 24, 160, 123, 221, 217, 14, 141, 5>>,
+            Decoded = Getmail("testcase1"),
+            ?assertMatch({Multipart, Mixed, _, _, [_, _]}, Decoded),
+            [Multi1, Message1] = element(5, Decoded),
+            ?assertMatch({Multipart, Alternative, _, _, [_, _]}, Multi1),
+            [Plain1, Html1] = element(5, Multi1),
+            ?assertMatch({Text, Plain, _, _, _}, Plain1),
+            ?assertMatch({Text, Html, _, _, _}, Html1),
+            ?assertMatch({Message, Ref822, _, _, _}, Message1),
+            Multi2 = element(5, Message1),
+            ?assertMatch({Multipart, Alternative, _, _, [_, _]}, Multi2),
+            [Plain2, Related1] = element(5, Multi2),
+            ?assertMatch({Text, Plain, _, _, _}, Plain2),
+            ?assertMatch({Multipart, Related, _, _, [_, _]}, Related1),
+            [Html2, Image1] = element(5, Related1),
+            ?assertMatch({Text, Html, _, _, _}, Html2),
+            ?assertMatch({Image, Jpeg, _, _, _}, Image1),
+            Resimage = erlang:md5(element(5, Image1)),
+            ?assertEqual(Imagemd5, Resimage)
+        end},
+        {"testcase2", fun() ->
+            Multipart = <<"multipart">>,
+            Alternative = <<"alternative">>,
+            Mixed = <<"mixed">>,
+            Text = <<"text">>,
+            Html = <<"html">>,
+            Plain = <<"plain">>,
+            Message = <<"message">>,
+            Ref822 = <<"rfc822">>,
+            Application = <<"application">>,
+            Octetstream = <<"octet-stream">>,
+            Decoded = Getmail("testcase2"),
+            ?assertMatch({Multipart, Mixed, _, _, [_, _, _]}, Decoded),
+            [Plain1, Stream1, Message1] = element(5, Decoded),
+            ?assertMatch({Text, Plain, _, _, _}, Plain1),
+            ?assertMatch({Application, Octetstream, _, _, _}, Stream1),
+            ?assertMatch({Message, Ref822, _, _, _}, Message1),
+            Multi1 = element(5, Message1),
+            ?assertMatch({Multipart, Alternative, _, _, [_, _]}, Multi1),
+            [Plain2, Html1] = element(5, Multi1),
+            ?assertMatch({Text, Plain, _, _, _}, Plain2),
+            ?assertMatch({Text, Html, _, _, _}, Html1)
+        end}
+    ].
+
+decode_quoted_printable_test_() ->
+    [
+        {"bleh", fun() ->
+            ?assertEqual(<<"!">>, decode_quoted_printable(<<"=21">>)),
+            ?assertEqual(<<"!!">>, decode_quoted_printable(<<"=21=21">>)),
+            ?assertEqual(<<"=:=">>, decode_quoted_printable(<<"=3D:=3D">>)),
+            ?assertEqual(
+                <<"Thequickbrownfoxjumpedoverthelazydog.">>,
+                decode_quoted_printable(<<"Thequickbrownfoxjumpedoverthelazydog.">>)
+            )
+        end},
+        {"lowercase bleh", fun() ->
+            ?assertEqual(<<"=:=">>, decode_quoted_printable(<<"=3d:=3d">>))
+        end},
+        {"input with spaces", fun() ->
+            ?assertEqual(
+                <<"The quick brown fox jumped over the lazy dog.">>,
+                decode_quoted_printable(<<"The quick brown fox jumped over the lazy dog.">>)
+            )
+        end},
+        {"input with tabs", fun() ->
+            ?assertEqual(
+                <<"The\tquick brown fox jumped over\tthe lazy dog.">>,
+                decode_quoted_printable(<<"The\tquick brown fox jumped over\tthe lazy dog.">>)
+            )
+        end},
+        {"input with trailing spaces", fun() ->
+            ?assertEqual(
+                <<"The quick brown fox jumped over the lazy dog.">>,
+                decode_quoted_printable(<<"The quick brown fox jumped over the lazy dog.       ">>)
+            )
+        end},
+        {"input with non-strippable trailing whitespace", fun() ->
+            ?assertEqual(
+                <<"The quick brown fox jumped over the lazy dog.        ">>,
+                decode_quoted_printable(<<"The quick brown fox jumped over the lazy dog.       =20">>)
+            ),
+            ?assertEqual(
+                <<"The quick brown fox jumped over the lazy dog.       \t">>,
+                decode_quoted_printable(<<"The quick brown fox jumped over the lazy dog.       =09">>)
+            ),
+            ?assertEqual(
+                <<"The quick brown fox jumped over the lazy dog.\t \t \t \t ">>,
+                decode_quoted_printable(<<"The quick brown fox jumped over the lazy dog.\t \t \t =09=20">>)
+            ),
+            ?assertEqual(
+                <<"The quick brown fox jumped over the lazy dog.\t \t \t \t ">>,
+                decode_quoted_printable(
+                    <<"The quick brown fox jumped over the lazy dog.\t \t \t =09=20\t                  \t">>
+                )
+            )
+        end},
+        {"input with trailing tabs", fun() ->
+            ?assertEqual(
+                <<"The quick brown fox jumped over the lazy dog.">>,
+                decode_quoted_printable(<<"The quick brown fox jumped over the lazy dog.\t\t\t\t\t">>)
+            )
+        end},
+        {"soft new line", fun() ->
+            ?assertEqual(
+                <<"The quick brown fox jumped over the lazy dog.       ">>,
+                decode_quoted_printable(<<"The quick brown fox jumped over the lazy dog.       =">>)
+            )
+        end},
+        {"soft new line with trailing whitespace", fun() ->
+            ?assertEqual(
+                <<"The quick brown fox jumped over the lazy dog.       ">>,
+                decode_quoted_printable(<<"The quick brown fox jumped over the lazy dog.       =  	">>)
+            )
+        end},
+        {"multiline stuff", fun() ->
+            ?assertEqual(
+                <<"Now's the time for all folk to come to the aid of their country.">>,
+                decode_quoted_printable(
+                    <<"Now's the time =\r\nfor all folk to come=\r\n to the aid of their country.">>
+                )
+            ),
+            ?assertEqual(
+                <<"Now's the time\r\nfor all folk to come\r\n to the aid of their country.">>,
+                decode_quoted_printable(<<"Now's the time\r\nfor all folk to come\r\n to the aid of their country.">>)
+            ),
+            ?assertEqual(<<"hello world">>, decode_quoted_printable(<<"hello world">>)),
+            ?assertEqual(<<"hello\r\n\r\nworld">>, decode_quoted_printable(<<"hello\r\n\r\nworld">>))
+        end},
+        {"invalid input", fun() ->
+            ?assertThrow(badchar, decode_quoted_printable(<<"=21=G1">>)),
+            ?assertThrow(badchar, decode_quoted_printable(<<"=21=D1 = g ">>))
+        end},
+        %% TODO zotonic's iconv throws eilseq here.
+        % {"out of range characters should be stripped",
+        % 	fun() ->
+        % 		% character 150 is en-dash in windows 1252
+        % 		?assertEqual(<<"Foo  bar"/utf8>>, decode_body(<<"quoted-printable">>, <<"Foo ", 150, " bar">>, "US-ASCII", "UTF-8//IGNORE"))
+        % 	end
+        % },
+        {"out of range character in alternate charset should be converted", fun() ->
+            % character 150 is en-dash in windows 1252
+            ?assertEqual(
+                <<"Foo ", 226, 128, 147, " bar">>,
+                decode_body(<<"quoted-printable">>, <<"Foo ", 150, " bar">>, "Windows-1252", "UTF-8//IGNORE")
+            )
+        end},
+        {"out of range character in alternate charset with no destination encoding should be stripped", fun() ->
+            % character 150 is en-dash in windows 1252
+            ?assertEqual(
+                <<"Foo  bar">>, decode_body(<<"quoted-printable">>, <<"Foo ", 150, " bar">>, "Windows-1252", none)
+            )
+        end},
+        {"out of range character in alternate charset with no source encoding should be stripped", fun() ->
+            % character 150 is en-dash in windows 1252
+            ?assertEqual(
+                <<"Foo  bar">>, decode_body(<<"quoted-printable">>, <<"Foo ", 150, " bar">>, undefined, "UTF-8")
+            )
+        end},
+        {"almost correct chatsets should work, eg. 'UTF8' instead of 'UTF-8'", fun() ->
+            % character 150 is en-dash in windows 1252
+            ?assertEqual(<<"Foo  bar">>, decode_body(<<"quoted-printable">>, <<"Foo  bar">>, <<"UTF8">>, "UTF-8")),
+            ?assertEqual(<<"Foo  bar">>, decode_body(<<"quoted-printable">>, <<"Foo  bar">>, <<"utf8">>, "UTF-8"))
+        end}
+    ].
+
+valid_smtp_mime_7bit_test() ->
+    ?assert(valid_7bit(<<>>)),
+    ?assert(valid_7bit(<<"abcdefghijklmnopqrstuvwxyz0123456789">>)),
+    ?assert(valid_7bit(<<"abc\r\ndef">>)),
+    AllValidRange =
+        (lists:seq(1, $\n - 1) ++
+            lists:seq($\n + 1, $\r - 1) ++
+            lists:seq($\r + 1, 127)),
+    ?assert(valid_7bit(list_to_binary(AllValidRange))),
+    ?assertNot(valid_7bit(<<"\n">>)),
+    ?assertNot(valid_7bit(<<"\r">>)),
+    ?assertNot(valid_7bit(<<"abc\ndef">>)),
+    ?assertNot(valid_7bit(<<"abc\rdef">>)),
+    ?assertNot(valid_7bit(<<"abc\n\rdef">>)),
+    ?assertNot(valid_7bit(<<128, 200, 255>>)),
+    ?assertNot(valid_7bit(<<0, 0, 0>>)),
+    ?assertNot(valid_7bit(<<"hello", 128, 0, 200>>)),
+    %% Long lines
+    Line800 = binary:copy(<<$a>>, 800),
+    ?assertNot(has_lines_over_998(Line800)),
+    Many800Lines = list_to_binary(lists:join("\r\n", lists:duplicate(10, Line800))),
+    ?assertNot(has_lines_over_998(Many800Lines)),
+    Line1000 = binary:copy(<<$a>>, 1000),
+    ?assert(has_lines_over_998(Line1000)),
+    Many1000Lines = list_to_binary(lists:join("\r\n", lists:duplicate(10, Line1000))),
+    ?assert(has_lines_over_998(Many1000Lines)),
+    ?assert(has_lines_over_998(<<Line800/binary, "\r\n", Line1000/binary>>)).
+
+encode_quoted_printable_test_() ->
+    [
+        {"bleh", fun() ->
+            ?assertEqual([<<"!">>], encode_quoted_printable(<<"!">>)),
+            ?assertEqual([<<"!!">>], encode_quoted_printable(<<"!!">>)),
+            ?assertEqual([<<"=3D:=3D">>], encode_quoted_printable(<<"=:=">>)),
+            ?assertEqual(
+                [<<"Thequickbrownfoxjumpedoverthelazydog.">>],
+                encode_quoted_printable(<<"Thequickbrownfoxjumpedoverthelazydog.">>)
+            )
+        end},
+        {"input with spaces", fun() ->
+            ?assertEqual(
+                [<<"The quick brown fox jumped over the lazy dog.">>],
+                encode_quoted_printable(<<"The quick brown fox jumped over the lazy dog.">>)
+            )
+        end},
+        {"input with tabs", fun() ->
+            ?assertEqual(
+                [<<"The\tquick brown fox jumped over\tthe lazy dog.">>],
+                encode_quoted_printable(<<"The\tquick brown fox jumped over\tthe lazy dog.">>)
+            )
+        end},
+        {"input with trailing spaces", fun() ->
+            ?assertEqual(
+                [<<"The quick brown fox jumped over the lazy dog.      =20\r\n">>],
+                encode_quoted_printable(<<"The quick brown fox jumped over the lazy dog.       \r\n">>)
+            ),
+            ?assertEqual(
+                [<<"The quick brown fox jumped over the lazy dog.      =20">>],
+                encode_quoted_printable(<<"The quick brown fox jumped over the lazy dog.       ">>)
+            )
+        end},
+        {"input with trailing tabs", fun() ->
+            ?assertEqual(
+                [<<"The quick brown fox jumped over the lazy dog.	=09\r\n">>],
+                encode_quoted_printable(<<"The quick brown fox jumped over the lazy dog.		\r\n">>)
+            ),
+            ?assertEqual(
+                [<<"The quick brown fox jumped over the lazy dog.	=09">>],
+                encode_quoted_printable(<<"The quick brown fox jumped over the lazy dog.		">>)
+            )
+        end},
+        {"input with non-ascii characters", fun() ->
+            ?assertEqual(
+                [<<"There's some n=F8n-=E1scii st=FCff in here\r\n">>],
+                encode_quoted_printable(<<"There's some n", 248, "n-", 225, "scii st", 252, "ff in here\r\n">>)
+            )
+        end},
+        {"input with invisible non-ascii characters", fun() ->
+            ?assertEqual(
+                [<<"There's some stuff=C2=A0in=C2=A0here\r\n">>],
+                encode_quoted_printable(<<"There's some stuff in here\r\n"/utf8>>)
+            )
+        end},
+        {"add soft newlines", fun() ->
+            ?assertEqual(
+                [
+                    <<"The quick brown fox jumped over the lazy dog. The quick brown fox jumped =\r\nover the lazy dog.">>
+                ],
+                encode_quoted_printable(
+                    <<"The quick brown fox jumped over the lazy dog. The quick brown fox jumped over the lazy dog.">>
+                )
+            ),
+            ?assertEqual(
+                [
+                    <<"The_quick_brown_fox_jumped_over_the_lazy_dog._The_quick_brown_fox_jumped_ov=\r\ner_the_lazy_dog.">>
+                ],
+                encode_quoted_printable(
+                    <<"The_quick_brown_fox_jumped_over_the_lazy_dog._The_quick_brown_fox_jumped_over_the_lazy_dog.">>
+                )
+            ),
+            ?assertEqual(
+                [
+                    <<"The_quick_brown_fox_jumped_over_the_lazy_dog._The_quick_brown_fox_jumped_o=\r\n=3Dver_the_lazy_dog.">>
+                ],
+                encode_quoted_printable(
+                    <<"The_quick_brown_fox_jumped_over_the_lazy_dog._The_quick_brown_fox_jumped_o=ver_the_lazy_dog.">>
+                )
+            ),
+            ?assertEqual(
+                [
+                    <<"The_quick_brown_fox_jumped_over_the_lazy_dog._The_quick_brown_fox_jumped_=\r\n=3Dover_the_lazy_dog.">>
+                ],
+                encode_quoted_printable(
+                    <<"The_quick_brown_fox_jumped_over_the_lazy_dog._The_quick_brown_fox_jumped_=over_the_lazy_dog.">>
+                )
+            ),
+            ?assertEqual(
+                [
+                    <<"The_quick_brown_fox_jumped_over_the_lazy_dog._The_quick_brown_fox_jumped_o =\r\nver_the_lazy_dog.">>
+                ],
+                encode_quoted_printable(
+                    <<"The_quick_brown_fox_jumped_over_the_lazy_dog._The_quick_brown_fox_jumped_o ver_the_lazy_dog.">>
+                )
+            )
+        end},
+        {"soft newline edge cases", fun() ->
+            ?assertEqual(
+                [
+                    <<
+                        "123456789 123456789 123456789 123456789 123456789 123456789 123456789 12345=\r\n"
+                        "=20"
+                    >>
+                ],
+                encode_quoted_printable(
+                    <<"123456789 123456789 123456789 123456789 123456789 123456789 123456789 12345 ">>
+                )
+            ),
+            ?assertEqual(
+                [
+                    <<
+                        "123456789 123456789 123456789 123456789 123456789 123456789 123456789 12345=\r\n"
+                        "=20\r\n"
+                    >>
+                ],
+                encode_quoted_printable(
+                    <<"123456789 123456789 123456789 123456789 123456789 123456789 123456789 12345 \r\n">>
+                )
+            ),
+            ?assertEqual(
+                [
+                    <<
+                        "123456789 123456789 123456789 123456789 123456789 123456789 123456789 12345=\r\n"
+                        "=09"
+                    >>
+                ],
+                encode_quoted_printable(
+                    <<"123456789 123456789 123456789 123456789 123456789 123456789 123456789 12345	">>
+                )
+            ),
+            ?assertEqual(
+                [
+                    <<
+                        "123456789 123456789 123456789 123456789 123456789 123456789 123456789 12345=\r\n"
+                        "=09\r\n"
+                    >>
+                ],
+                encode_quoted_printable(
+                    <<"123456789 123456789 123456789 123456789 123456789 123456789 123456789 12345	\r\n">>
+                )
+            ),
+            ?assertEqual(
+                [
+                    <<
+                        "123456789 123456789 123456789 123456789 123456789 123456789 123456789 =\r\n"
+                        "12345=3D"
+                    >>
+                ],
+                encode_quoted_printable(
+                    <<"123456789 123456789 123456789 123456789 123456789 123456789 123456789 12345=">>
+                )
+            ),
+            ?assertEqual(
+                [
+                    <<
+                        " 23456789012345678901234567890123456789012345678901234567890123456789012345=\r\n"
+                        "=20"
+                    >>
+                ],
+                encode_quoted_printable(
+                    <<" 23456789012345678901234567890123456789012345678901234567890123456789012345 ">>
+                )
+            ),
+            ?assertEqual(
+                [
+                    <<
+                        " =\r\n"
+                        "234567890123456789012345678901234567890123456789012345678901234567890123456"
+                    >>
+                ],
+                encode_quoted_printable(
+                    <<" 234567890123456789012345678901234567890123456789012345678901234567890123456">>
+                )
+            ),
+            ?assertEqual(
+                [
+                    <<
+                        " 23456789012345678901234567890123456789012345678901234567890123456789012345=\r\n"
+                        "=3D"
+                    >>
+                ],
+                encode_quoted_printable(
+                    <<" 23456789012345678901234567890123456789012345678901234567890123456789012345=">>
+                )
+            )
+        end}
+    ].
+
+encode_parameter_test_() ->
+    [
+        {"Token", fun() ->
+            ?assertEqual(
+                [<<"a=abcdefghijklmnopqrstuvwxyz$%&*#!">>],
+                encode_parameters([{<<"a">>, <<"abcdefghijklmnopqrstuvwxyz$%&*#!">>}])
+            ),
+            ?assertEqual(
+                [<<"a=12345678901234567890123456789012345678901234567890123456789012345678901234">>],
+                encode_parameters([
+                    {<<"a">>, <<"12345678901234567890123456789012345678901234567890123456789012345678901234">>}
+                ])
+            ),
+            ?assertEqual(
+                [
+                    <<"a*0=123456789012345678901234567890123456789012345678901234567890123456789012">>,
+                    <<"a*1=345">>
+                ],
+                encode_parameters([
+                    {<<"a">>, <<"123456789012345678901234567890123456789012345678901234567890123456789012345">>}
+                ])
+            )
+        end},
+        {"TSpecial", fun() ->
+            Special = " ()<>@,;:/[]?=",
+            [
+                ?assertEqual([<<"a=", $", C, $">>], encode_parameters([{<<"a">>, <<C>>}]))
+             || C <- Special
+            ],
+            ?assertEqual([<<"a=", $", $\\, $", $">>], encode_parameters([{<<"a">>, <<$">>}])),
+            ?assertEqual([<<"a=", $", $\\, $\\, $">>], encode_parameters([{<<"a">>, <<$\\>>}])),
+            ?assertEqual(
+                [<<"a=\"123456789 123456789 123456789 123456789 123456789 123456789 123456789 12\"">>],
+                encode_parameters([
+                    {<<"a">>, <<"123456789 123456789 123456789 123456789 123456789 123456789 123456789 12">>}
+                ])
+            ),
+            ?assertEqual(
+                [
+                    <<"a*0=\"123456789 123456789 123456789 123456789 123456789 123456789 123456789 \"">>,
+                    <<"a*1=\"123\"">>
+                ],
+                encode_parameters([
+                    {<<"a">>, <<"123456789 123456789 123456789 123456789 123456789 123456789 123456789 123">>}
+                ])
+            )
+        end},
+        {"RFC2231 encoded", fun() ->
+            ?assertEqual(
+                [<<"a*=''1234567%001234567%001234567%001234567%001234567%001234567%001234567%001">>],
+                encode_parameters([
+                    {<<"a">>,
+                        <<"1234567", 0, "1234567", 0, "1234567", 0, "1234567", 0, "1234567", 0, "1234567", 0, "1234567",
+                            0, "1">>}
+                ])
+            ),
+            ?assertEqual(
+                [
+                    <<"a*0*=''1234567%001234567%001234567%001234567%001234567%001234567%001234567">>,
+                    <<"a*1*=%0012">>
+                ],
+                encode_parameters([
+                    {<<"a">>,
+                        <<"1234567", 0, "1234567", 0, "1234567", 0, "1234567", 0, "1234567", 0, "1234567", 0, "1234567",
+                            0, "12">>}
+                ])
+            )
+        end},
+        {"RFC2231 encoded with UTF-8", fun() ->
+            ?assertEqual(
+                [<<"a*=UTF-8''1234%C2%A01234%C2%A01234%C2%A01234%C2%A01234%C2%A01234%C2%A01234">>],
+                encode_parameters([
+                    {<<"a">>,
+                        <<"1234", 16#c2, 16#a0, "1234", 16#c2, 16#a0, "1234", 16#c2, 16#a0, "1234", 16#c2, 16#a0,
+                            "1234", 16#c2, 16#a0, "1234", 16#c2, 16#a0, "1234">>}
+                ])
+            ),
+            ?assertEqual(
+                [
+                    <<"a*0*=UTF-8''1234%C2%A01234%C2%A01234%C2%A01234%C2%A01234%C2%A01234%C2%A01234">>,
+                    <<"a*1*=%C2%A0">>
+                ],
+                encode_parameters([
+                    {<<"a">>,
+                        <<"1234", 16#c2, 16#a0, "1234", 16#c2, 16#a0, "1234", 16#c2, 16#a0, "1234", 16#c2, 16#a0,
+                            "1234", 16#c2, 16#a0, "1234", 16#c2, 16#a0, "1234", 16#c2, 16#a0>>}
+                ])
+            )
+        end}
+    ].
+
+rfc2047_decode_test_() ->
+    [
+        {"Simple tests", fun() ->
+            ?assertEqual(
+                <<"Keith Moore <moore@cs.utk.edu>"/utf8>>,
+                decode_header(<<"=?US-ASCII?Q?Keith_Moore?= <moore@cs.utk.edu>">>, "utf-8")
+            ),
+            ?assertEqual(
+                <<"Keld Jørn Simonsen <keld@dkuug.dk>"/utf8>>,
+                decode_header(<<"=?ISO-8859-1?Q?Keld_J=F8rn_Simonsen?= <keld@dkuug.dk>">>, "utf-8")
+            ),
+            ?assertEqual(
+                <<"Olle Järnefors <ojarnef@admin.kth.se>"/utf8>>,
+                decode_header(<<"=?ISO-8859-1?Q?Olle_J=E4rnefors?= <ojarnef@admin.kth.se>">>, "utf-8")
+            ),
+            ?assertEqual(
+                <<"André Pirard <PIRARD@vm1.ulg.ac.be>"/utf8>>,
+                decode_header(<<"=?ISO-8859-1?Q?Andr=E9?= Pirard <PIRARD@vm1.ulg.ac.be>">>, "utf-8")
+            )
+        end},
+        {"encoded words separated by whitespace should have whitespace removed", fun() ->
+            ?assertEqual(
+                <<"If you can read this you understand the example.">>,
+                decode_header(
+                    <<"=?ISO-8859-1?B?SWYgeW91IGNhbiByZWFkIHRoaXMgeW8=?= =?ISO-8859-2?B?dSB1bmRlcnN0YW5kIHRoZSBleGFtcGxlLg==?=">>,
+                    "utf-8"
+                )
+            ),
+            ?assertEqual(<<"ab">>, decode_header(<<"=?ISO-8859-1?Q?a?= =?ISO-8859-1?Q?b?=">>, "utf-8")),
+            ?assertEqual(<<"ab">>, decode_header(<<"=?ISO-8859-1?Q?a?=  =?ISO-8859-1?Q?b?=">>, "utf-8")),
+            ?assertEqual(
+                <<"ab">>,
+                decode_header(
+                    <<
+                        "=?ISO-8859-1?Q?a?=\n"
+                        "		=?ISO-8859-1?Q?b?="
+                    >>,
+                    "utf-8"
+                )
+            )
+        end},
+        {"underscores expand to spaces", fun() ->
+            ?assertEqual(<<"a b">>, decode_header(<<"=?ISO-8859-1?Q?a_b?=">>, "utf-8")),
+            ?assertEqual(<<"a b">>, decode_header(<<"=?ISO-8859-1?Q?a?= =?ISO-8859-2?Q?_b?=">>, "utf-8"))
+        end},
+        {"edgecases", fun() ->
+            ?assertEqual(
+                <<"this is some text">>, decode_header(<<"=?iso-8859-1?q?this=20is=20some=20text?=">>, "utf-8")
+            ),
+            ?assertEqual(
+                <<"=?iso-8859-1?q?this is some text?=">>,
+                decode_header(<<"=?iso-8859-1?q?this is some text?=">>, "utf-8")
+            )
+        end},
+        {"invalid character sequence handling", fun() ->
+            ?assertException(
+                throw,
+                eilseq,
+                decode_header(<<"=?us-ascii?B?dGhpcyBjb250YWlucyBhIGNvcHlyaWdodCCpIHN5bWJvbA==?=">>, "utf-8")
+            ),
+            %?assertEqual(<<"this contains a copyright  symbol"/utf8>>, decode_header(<<"=?us-ascii?B?dGhpcyBjb250YWlucyBhIGNvcHlyaWdodCCpIHN5bWJvbA==?=">>, "utf-8//IGNORE")),
+            ?assertEqual(
+                <<"this contains a copyright © symbol"/utf8>>,
+                decode_header(<<"=?iso-8859-1?B?dGhpcyBjb250YWlucyBhIGNvcHlyaWdodCCpIHN5bWJvbA==?=">>, "utf-8//IGNORE")
+            )
+        end},
+        {"multiple unicode email addresses", fun() ->
+            ?assertEqual(
+                <<
+                    "Jacek Złydach <jacek.zlydach@erlang-solutions.com>, "
+                    "chak de planet óóóó <jz@erlang-solutions.com>, "
+                    "Jacek Złydach <jacek.zlydach@erlang-solutions.com>, "
+                    "chak de planet óóóó <jz@erlang-solutions.com>"/utf8
+                >>,
+                decode_header(
+                    <<
+                        "=?UTF-8?B?SmFjZWsgWsWCeWRhY2g=?= <jacek.zlydach@erlang-solutions.com>, "
+                        "=?UTF-8?B?Y2hhayBkZSBwbGFuZXQgw7PDs8Ozw7M=?= <jz@erlang-solutions.com>, "
+                        "=?UTF-8?B?SmFjZWsgWsWCeWRhY2g=?= <jacek.zlydach@erlang-solutions.com>, "
+                        "=?UTF-8?B?Y2hhayBkZSBwbGFuZXQgw7PDs8Ozw7M=?= <jz@erlang-solutions.com>"
+                    >>,
+                    "utf-8"
+                )
+            )
+        end},
+        {"decode something I encoded myself", fun() ->
+            A = <<"Jacek Złydach <jacek.zlydach@erlang-solutions.com>"/utf8>>,
+            ?assertEqual(A, decode_header(rfc2047_utf8_encode(A), "utf-8"))
+        end}
+    ].
+
+rfc2047_utf8_encode_test_() ->
+    [
+        {"Q-Encoding", fun() ->
+            ?assertEqual(
+                <<"=?UTF-8?Q?abcdefghijklmnopqrstuvwxyz?=">>,
+                rfc2047_utf8_encode(q, <<"abcdefghijklmnopqrstuvwxyz">>, <<>>, 0, <<" ">>)
+            ),
+            ?assertEqual(
+                <<"=?UTF-8?Q?ABCDEFGHIJKLMNOPQRSTUVWXYZ?=">>,
+                rfc2047_utf8_encode(q, <<"ABCDEFGHIJKLMNOPQRSTUVWXYZ">>, <<>>, 0, <<" ">>)
+            ),
+            ?assertEqual(<<"=?UTF-8?Q?0123456789?=">>, rfc2047_utf8_encode(q, <<"0123456789">>, <<>>, 0, <<" ">>)),
+            ?assertEqual(<<"=?UTF-8?Q?!*+-/?=">>, rfc2047_utf8_encode(q, <<"!*+-/">>, <<>>, 0, <<" ">>)),
+            ?assertEqual(
+                <<
+                    "=?UTF-8?Q?This_text_encodes_to_more_than_63_bytes=2E_Therefore=2C_it_shou?=\r\n"
+                    " =?UTF-8?Q?ld_be_encoded_in_multiple_encoded_words=2E?="
+                >>,
+                rfc2047_utf8_encode(
+                    q,
+                    <<"This text encodes to more than 63 bytes. Therefore, it should be encoded in multiple encoded words.">>,
+                    <<>>,
+                    0,
+                    <<" ">>
+                )
+            ),
+            ?assertEqual(
+                <<
+                    "=?UTF-8?Q?This_text_encodes_to_more_than_63_bytes_with_offset_f?=\r\n"
+                    "\t=?UTF-8?Q?or_a_parameter=2E_Therefore=2C_it_should_be_encoded_in_multipl?=\r\n"
+                    "\t=?UTF-8?Q?e_encoded_words=2E?="
+                >>,
+                rfc2047_utf8_encode(
+                    q,
+                    <<
+                        "This text encodes to more than 63 bytes with offset for a parameter. "
+                        "Therefore, it should be encoded in multiple encoded words."
+                    >>,
+                    <<>>,
+                    10,
+                    <<"\t">>
+                )
+            ),
+            ?assertEqual(
+                <<
+                    "=?UTF-8?Q?We_place_an_UTF8_4byte_character_over_the_breaking_point_here_?=\r\n"
+                    " =?UTF-8?Q?=F0=9F=80=84?="
+                >>,
+                rfc2047_utf8_encode(
+                    q,
+                    <<"We place an UTF8 4byte character over the breaking point here ", 16#F0, 16#9F, 16#80, 16#84>>,
+                    <<>>,
+                    0,
+                    <<" ">>
+                )
+            )
+        end},
+        {"B-Encoding", fun() ->
+            ?assertEqual(
+                <<"=?UTF-8?B?U29tZSBzaG9ydCB0ZXh0Lg==?=">>,
+                rfc2047_utf8_encode(b, <<"Some short text.">>, <<>>, 0, <<" ">>)
+            ),
+            ?assertEqual(
+                <<
+                    "=?UTF-8?B?VGhpcyB0ZXh0IGVuY29kZXMgdG8gbW9yZSB0aGFuIDYzIGJ5dGVzLiBUaGVy?=\r\n"
+                    " =?UTF-8?B?ZWZvcmUsIGl0IHNob3VsZCBiZSBlbmNvZGVkIGluIG11bHRpcGxlIGVuY29k?=\r\n"
+                    " =?UTF-8?B?ZWQgd29yZHMu?="
+                >>,
+                rfc2047_utf8_encode(
+                    b,
+                    <<"This text encodes to more than 63 bytes. Therefore, it should be encoded in multiple encoded words.">>,
+                    <<>>,
+                    1,
+                    <<" ">>
+                )
+            ),
+            ?assertEqual(
+                <<
+                    "=?UTF-8?B?AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKiss?=\r\n"
+                    " =?UTF-8?B?LS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZ?=\r\n"
+                    " =?UTF-8?B?WltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8=?="
+                >>,
+                rfc2047_utf8_encode(b, <<<<X>> || X <- lists:seq(0, 16#7F)>>, <<>>, 1, <<" ">>)
+            ),
+            ?assertEqual(
+                <<
+                    "=?UTF-8?B?UGxhY2UgYW4gVVRGOCA0Ynl0ZSBjaGFyYWN0ZXIgYXQgdGhlIGJyZWFr?=\r\n"
+                    " =?UTF-8?B?8J+AhA==?="
+                >>,
+                rfc2047_utf8_encode(
+                    b, <<"Place an UTF8 4byte character at the break", 16#F0, 16#9F, 16#80, 16#84>>, <<>>, 1, <<" ">>
+                )
+            )
+        end},
+        {"Pick encoding", fun() ->
+            ?assertEqual(<<"asdf">>, rfc2047_utf8_encode(<<"asdf">>)),
+            ?assertEqual(<<"=?UTF-8?Q?x=09?=">>, rfc2047_utf8_encode(<<"x\t">>)),
+            ?assertEqual(<<"=?UTF-8?B?CXgJ?=">>, rfc2047_utf8_encode(<<"\tx\t">>))
+        end}
+    ].
+
+encoding_test_() ->
+    Getmail = fun(File) ->
+        {ok, Email} = file:read_file(filename:join("test/smtp/fixtures/", File)),
+        decode(Email)
+    end,
+    [
+        {"Simple email", fun() ->
+            Email =
+                {<<"text">>, <<"plain">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"To">>, <<"you@example.com">>},
+                        {<<"Subject">>, <<"This is a test">>},
+                        {<<"Message-ID">>, <<"<abcd@example.com>">>},
+                        {<<"MIME-Version">>, <<"1.0">>},
+                        {<<"Date">>, <<"Sun, 01 Nov 2009 14:44:47 +0200">>}
+                    ],
+                    #{
+                        content_type_params =>
+                            [{<<"charset">>, <<"US-ASCII">>}],
+                        disposition => <<"inline">>
+                    },
+                    <<"This is a plain message">>},
+            Result =
+                <<"From: me@example.com\r\nTo: you@example.com\r\nSubject: This is a test\r\nMessage-ID: <abcd@example.com>\r\nMIME-Version: 1.0\r\nDate: Sun, 01 Nov 2009 14:44:47 +0200\r\n\r\nThis is a plain message">>,
+            ?assertEqual(Result, encode(Email))
+        end},
+        {"Email with UTF-8 characters", fun() ->
+            Email =
+                {<<"text">>, <<"plain">>,
+                    [
+                        {<<"Subject">>, <<"Fræderik Hølljen"/utf8>>},
+                        {<<"From">>, <<"Fræderik Hølljen <me@example.com>"/utf8>>},
+                        {<<"To">>, <<"you@example.com">>},
+                        {<<"Message-ID">>, <<"<abcd@example.com>">>},
+                        {<<"MIME-Version">>, <<"1.0">>},
+                        {<<"Date">>, <<"Sun, 01 Nov 2009 14:44:47 +0200">>}
+                    ],
+                    #{
+                        content_type_params =>
+                            [{<<"charset">>, <<"US-ASCII">>}],
+                        disposition => <<"inline">>
+                    },
+                    <<"This is a plain message">>},
+            Result =
+                <<"Subject: =?UTF-8?Q?Fr=C3=A6derik_H=C3=B8lljen?=\r\nFrom: =?UTF-8?Q?Fr=C3=A6derik_H=C3=B8lljen?= <me@example.com>\r\nTo: you@example.com\r\nMessage-ID: <abcd@example.com>\r\nMIME-Version: 1.0\r\nDate: Sun, 01 Nov 2009 14:44:47 +0200\r\n\r\nThis is a plain message">>,
+            ?assertEqual(Result, encode(Email))
+        end},
+        {"Email with UTF-8 in attachment filename.", fun() ->
+            FileName = <<
+                "Čia labai ilgas el. laiško priedo pavadinimas su "/utf8,
+                "lietuviškomis ar kokiomis kitomis ne ascii raidėmis.pdf"/utf8
+            >>,
+            Email =
+                {<<"multipart">>, <<"mixed">>,
+                    [
+                        {<<"From">>, <<"k.petrauskas@erisata.lt">>},
+                        {<<"Subject">>, <<"Čiobiškis"/utf8>>},
+                        {<<"Date">>, <<"Thu, 17 Dec 2020 20:12:33 +0200">>},
+                        {<<"Message-ID">>, <<"<47a08b7ff7d305087877361ca8eea1db@karolis.erisata.lt>">>}
+                    ],
+                    #{
+                        content_type_params => [
+                            {<<"boundary">>, <<"_=boundary-123=_">>}
+                        ]
+                    },
+                    [
+                        {<<"application">>, <<"pdf">>, [],
+                            #{
+                                content_type_params => [
+                                    {<<"name">>, FileName},
+                                    {<<"disposition">>, <<"attachment">>}
+                                ],
+                                disposition => <<"attachment">>,
+                                disposition_params => [{<<"filename">>, FileName}]
+                            },
+                            <<"data">>}
+                    ]},
+            Result = <<
+                "From: k.petrauskas@erisata.lt\r\n"
+                "Subject: =?UTF-8?Q?=C4=8Ciobi=C5=A1kis?=\r\n"
+                "Date: Thu, 17 Dec 2020 20:12:33 +0200\r\n"
+                "Message-ID: <47a08b7ff7d305087877361ca8eea1db@karolis.erisata.lt>\r\n"
+                "Content-Type: multipart/mixed;\r\n"
+                "\tboundary=\"_=boundary-123=_\"\r\n"
+                "MIME-Version: 1.0\r\n"
+                "\r\n"
+                "\r\n"
+                "--_=boundary-123=_\r\n"
+                "Content-Type: application/pdf;\r\n"
+                "\tname*0*=UTF-8''%C4%8Cia%20labai%20ilgas%20el.%20lai%C5%A1ko%20priedo%20pavad;\r\n"
+                "\tname*1*=inimas%20su%20lietuvi%C5%A1komis%20ar%20kokiomis%20kitomis%20ne%20as;\r\n"
+                "\tname*2*=cii%20raid%C4%97mis.pdf;\r\n"
+                "\tdisposition=attachment\r\n"
+                "Content-Disposition: attachment;\r\n"
+                "\tfilename*0*=UTF-8''%C4%8Cia%20labai%20ilgas%20el.%20lai%C5%A1ko%20priedo%20p;\r\n"
+                "\tfilename*1*=avadinimas%20su%20lietuvi%C5%A1komis%20ar%20kokiomis%20kitomis;\r\n"
+                "\tfilename*2*=%20ne%20ascii%20raid%C4%97mis.pdf\r\n"
+                "\r\n"
+                "data\r\n"
+                "--_=boundary-123=_--\r\n"
+            >>,
+            ?assertEqual(Result, encode(Email))
+        end},
+        {"Email with special chars in From", fun() ->
+            Email =
+                {<<"text">>, <<"plain">>,
+                    [
+                        {<<"From">>, <<"\"Admin & ' ( \\\"hallo\\\" ) ; , [ ] WS\" <a@example.com>">>},
+                        {<<"Message-ID">>, <<"<abcd@example.com>">>},
+                        {<<"MIME-Version">>, <<"1.0">>},
+                        {<<"Date">>, <<"Sun, 01 Nov 2009 14:44:47 +0200">>}
+                    ],
+                    #{}, <<"This is a plain message">>},
+            Result =
+                <<
+                    "From: \"Admin & ' ( \\\"hallo\\\" ) ; , [ ] WS\" <a@example.com>\r\n"
+                    "Message-ID: <abcd@example.com>\r\n"
+                    "MIME-Version: 1.0\r\n"
+                    "Date: Sun, 01 Nov 2009 14:44:47 +0200\r\n"
+                    "\r\n"
+                    "This is a plain message"
+                >>,
+            ?assertEqual(Result, encode(Email))
+        end},
+        {"multipart/alternative email", fun() ->
+            Email =
+                {<<"multipart">>, <<"alternative">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"To">>, <<"you@example.com">>},
+                        {<<"Subject">>, <<"This is a test">>},
+                        {<<"MIME-Version">>, <<"1.0">>},
+                        {<<"Content-Type">>, <<"multipart/alternative; boundary=wtf-123234234">>}
+                    ],
+                    #{
+                        content_type_params =>
+                            [{<<"boundary">>, <<"wtf-123234234">>}],
+                        disposition => <<"inline">>,
+                        disposition_params => []
+                    },
+                    [
+                        {<<"text">>, <<"plain">>,
+                            [
+                                {<<"Content-Type">>, <<"text/plain;charset=US-ASCII;format=flowed">>},
+                                {<<"Content-Transfer-Encoding">>, <<"7bit">>}
+                            ],
+                            #{
+                                content_type_params =>
+                                    [
+                                        {<<"charset">>, <<"US-ASCII">>},
+                                        {<<"format">>, <<"flowed">>}
+                                    ],
+                                disposition => <<"inline">>,
+                                disposition_params => []
+                            },
+                            <<"This message contains rich text.">>},
+                        {<<"text">>, <<"html">>,
+                            [
+                                {<<"Content-Type">>, <<"text/html;charset=US-ASCII">>},
+                                {<<"Content-Transfer-Encoding">>, <<"7bit">>}
+                            ],
+                            #{
+                                content_type_params =>
+                                    [{<<"charset">>, <<"US-ASCII">>}],
+                                disposition => <<"inline">>,
+                                disposition_params => []
+                            },
+                            <<"<html><body>This message also contains HTML</body></html>">>}
+                    ]},
+            Result = decode(encode(Email)),
+            ?assertMatch(
+                {<<"multipart">>, <<"alternative">>, _, _, [
+                    {<<"text">>, <<"plain">>, _, _, _}, {<<"text">>, <<"html">>, _, _, _}
+                ]},
+                Result
+            )
+        end},
+        {"multipart/alternative email with encoding", fun() ->
+            Email =
+                {<<"multipart">>, <<"alternative">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"To">>, <<"you@example.com">>},
+                        {<<"Subject">>, <<"This is a test">>},
+                        {<<"MIME-Version">>, <<"1.0">>},
+                        {<<"Content-Type">>, <<"multipart/alternative; boundary=wtf-123234234">>}
+                    ],
+                    #{
+                        content_type_params =>
+                            [{<<"boundary">>, <<"wtf-123234234">>}],
+                        disposition => <<"inline">>,
+                        disposition_params => []
+                    },
+                    [
+                        {<<"text">>, <<"plain">>,
+                            [
+                                {<<"Content-Type">>, <<"text/plain;charset=US-ASCII;format=flowed">>},
+                                {<<"Content-Transfer-Encoding">>, <<"quoted-printable">>}
+                            ],
+                            #{
+                                content_type_params =>
+                                    [
+                                        {<<"charset">>, <<"US-ASCII">>},
+                                        {<<"format">>, <<"flowed">>}
+                                    ],
+                                disposition => <<"inline">>,
+                                disposition_params => []
+                            },
+                            <<"This message contains rich text.\r\n", "and is =quoted printable= encoded!">>},
+                        {<<"text">>, <<"html">>,
+                            [
+                                {<<"Content-Type">>, <<"text/html;charset=US-ASCII">>},
+                                {<<"Content-Transfer-Encoding">>, <<"base64">>}
+                            ],
+                            #{
+                                content_type_params =>
+                                    [{<<"charset">>, <<"US-ASCII">>}],
+                                disposition => <<"inline">>,
+                                disposition_params => []
+                            },
+                            <<"<html><body>This message also contains", "HTML and is base64",
+                                "encoded\r\n\r\n</body></html>">>}
+                    ]},
+            Result = decode(encode(Email)),
+            ?assertMatch(
+                {<<"multipart">>, <<"alternative">>, _, _, [
+                    {<<"text">>, <<"plain">>, _, _,
+                        <<"This message contains rich text.\r\n", "and is =quoted printable= encoded!">>},
+                    {<<"text">>, <<"html">>, _, _,
+                        <<"<html><body>This message also contains", "HTML and is base64",
+                            "encoded\r\n\r\n</body></html>">>}
+                ]},
+                Result
+            )
+        end},
+        {"multipart/mixed email with multipart/alternative does not add an extra empty lines", fun() ->
+            Email = Getmail("message-text-html-attachment.eml"),
+            Encoded = encode(Email),
+            Re = re:run(Encoded, "(?:\\r\\n){3}", [global, {capture, all, binary}]),
+            ?assertMatch({match, [_]}, Re)
+        end},
+        {"Missing headers should be added", fun() ->
+            Email =
+                {<<"text">>, <<"plain">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"To">>, <<"you@example.com">>},
+                        {<<"Subject">>, <<"This is a test">>}
+                    ],
+                    #{
+                        content_type_params =>
+                            [{<<"charset">>, <<"US-ASCII">>}],
+                        disposition => <<"inline">>
+                    },
+                    <<"This is a plain message">>},
+            Result = decode(encode(Email)),
+            ?assertNot(undefined == proplists:get_value(<<"Message-ID">>, element(3, Result))),
+            ?assertNot(undefined == proplists:get_value(<<"Date">>, element(3, Result))),
+            ?assertEqual(undefined, proplists:get_value(<<"References">>, element(3, Result)))
+        end},
+        {"Reference header should be added in presence of In-Reply-To", fun() ->
+            Email =
+                {<<"text">>, <<"plain">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"To">>, <<"you@example.com">>},
+                        {<<"In-Reply-To">>, <<"<abcd@example.com>">>},
+                        {<<"Subject">>, <<"This is a test">>}
+                    ],
+                    #{
+                        content_type_params =>
+                            [{<<"charset">>, <<"US-ASCII">>}],
+                        disposition => <<"inline">>
+                    },
+                    <<"This is a plain message">>},
+            Result = decode(encode(Email)),
+            ?assertEqual(<<"<abcd@example.com>">>, proplists:get_value(<<"References">>, element(3, Result)))
+        end},
+        {"Reference header should be appended to in presence of In-Reply-To, if appropriate", fun() ->
+            Email =
+                {<<"text">>, <<"plain">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"To">>, <<"you@example.com">>},
+                        {<<"In-Reply-To">>, <<"<abcd@example.com>">>},
+                        {<<"References">>, <<"<wxyz@example.com>">>},
+                        {<<"Subject">>, <<"This is a test">>}
+                    ],
+                    #{
+                        content_type_params =>
+                            [{<<"charset">>, <<"US-ASCII">>}],
+                        disposition => <<"inline">>
+                    },
+                    <<"This is a plain message">>},
+            Result = decode(encode(Email)),
+            ?assertEqual(
+                <<"<wxyz@example.com> <abcd@example.com>">>, proplists:get_value(<<"References">>, element(3, Result))
+            )
+        end},
+        {"Reference header should NOT be appended to in presence of In-Reply-To, if already present", fun() ->
+            Email =
+                {<<"text">>, <<"plain">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"To">>, <<"you@example.com">>},
+                        {<<"In-Reply-To">>, <<"<abcd@example.com>">>},
+                        {<<"References">>, <<"<wxyz@example.com> <abcd@example.com>">>},
+                        {<<"Subject">>, <<"This is a test">>}
+                    ],
+                    #{
+                        content_type_params =>
+                            [{<<"charset">>, <<"US-ASCII">>}],
+                        disposition => <<"inline">>
+                    },
+                    <<"This is a plain message">>},
+            Result = decode(encode(Email)),
+            ?assertEqual(
+                <<"<wxyz@example.com> <abcd@example.com>">>, proplists:get_value(<<"References">>, element(3, Result))
+            )
+        end},
+        {"Content-Transfer-Encoding header should be added if missing and appropriate", fun() ->
+            Email =
+                {<<"text">>, <<"plain">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"To">>, <<"you@example.com">>},
+                        {<<"Subject">>, <<"This is a test">>}
+                    ],
+                    #{}, <<"This is a plain message with some non-ascii characters øÿ\r\nso there"/utf8>>},
+            Encoded = encode(Email),
+            Result = decode(Encoded),
+            ?assertEqual(
+                <<"quoted-printable">>, proplists:get_value(<<"Content-Transfer-Encoding">>, element(3, Result))
+            ),
+            Email2 =
+                {<<"text">>, <<"plain">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"To">>, <<"you@example.com">>},
+                        {<<"Subject">>, <<"This is a test">>}
+                    ],
+                    #{}, <<"This is a plain message with no non-ascii characters">>},
+            Encoded2 = encode(Email2),
+            Result2 = decode(Encoded2),
+            ?assertEqual(undefined, proplists:get_value(<<"Content-Transfer-Encoding">>, element(3, Result2))),
+            Email3 =
+                {<<"text">>, <<"plain">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"To">>, <<"you@example.com">>},
+                        {<<"Subject">>, <<"This is a test">>}
+                    ],
+                    #{transfer_encoding => <<"base64">>}, <<"This is a plain message with no non-ascii characters">>},
+            Encoded3 = encode(Email3),
+            Result3 = decode(Encoded3),
+            ?assertEqual(<<"base64">>, proplists:get_value(<<"Content-Transfer-Encoding">>, element(3, Result3)))
+        end},
+        {"Content-Type header should be added if missing and appropriate", fun() ->
+            Email =
+                {<<"text">>, <<"html">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"To">>, <<"you@example.com">>},
+                        {<<"Subject">>, <<"This is a test">>}
+                    ],
+                    #{}, <<"This is a HTML message with some non-ascii characters øÿ\r\nso there"/utf8>>},
+            Encoded = encode(Email),
+            Result = decode(Encoded),
+            ?assertEqual(
+                <<"quoted-printable">>, proplists:get_value(<<"Content-Transfer-Encoding">>, element(3, Result))
+            ),
+            ?assertMatch(<<"text/html;charset=utf-8">>, proplists:get_value(<<"Content-Type">>, element(3, Result))),
+            Email2 =
+                {<<"text">>, <<"html">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"To">>, <<"you@example.com">>},
+                        {<<"Subject">>, <<"This is a test">>}
+                    ],
+                    #{}, <<"This is a HTML message with no non-ascii characters\r\nso there">>},
+            Encoded2 = encode(Email2),
+            Result2 = decode(Encoded2),
+            ?assertMatch(
+                <<"text/html;charset=us-ascii">>, proplists:get_value(<<"Content-Type">>, element(3, Result2))
+            ),
+            Email3 =
+                {<<"text">>, <<"html">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"To">>, <<"you@example.com">>},
+                        {<<"Subject">>, <<"This is a test">>}
+                    ],
+                    #{}, <<"This is a text message with some invisible non-ascii characters\r\nso there"/utf8>>},
+            Encoded3 = encode(Email3),
+            Result3 = decode(Encoded3),
+            ?assertMatch(<<"text/html;charset=utf-8">>, proplists:get_value(<<"Content-Type">>, element(3, Result3)))
+        end},
+        {"Content-Type header should be added for subparts too, if missing and appropriate", fun() ->
+            Email4 =
+                {<<"multipart">>, <<"alternative">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"To">>, <<"you@example.com">>},
+                        {<<"Subject">>, <<"This is a test">>}
+                    ],
+                    #{}, [
+                        {<<"text">>, <<"plain">>, [], #{},
+                            <<"This is a multipart message with some invisible non-ascii characters\r\nso there"/utf8>>}
+                    ]},
+            Encoded4 = encode(Email4),
+            Result4 = decode(Encoded4),
+            ?assertMatch(
+                <<"text/plain;charset=utf-8">>,
+                proplists:get_value(<<"Content-Type">>, element(3, lists:nth(1, element(5, Result4))))
+            )
+        end},
+        {"Content-Type header should be not added for subparts if they're text/plain us-ascii", fun() ->
+            Email4 =
+                {<<"multipart">>, <<"alternative">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"To">>, <<"you@example.com">>},
+                        {<<"Subject">>, <<"This is a test">>}
+                    ],
+                    #{}, [
+                        {<<"text">>, <<"plain">>, [], #{},
+                            <<"This is a multipart message with no non-ascii characters\r\nso there">>}
+                    ]},
+            Encoded4 = encode(Email4),
+            Result4 = decode(Encoded4),
+            ?assertMatch(
+                undefined, proplists:get_value(<<"Content-Type">>, element(3, lists:nth(1, element(5, Result4))))
+            )
+        end},
+        {"Content-Type header should be added for subparts if they're text/html us-ascii", fun() ->
+            Email4 =
+                {<<"multipart">>, <<"alternative">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"To">>, <<"you@example.com">>},
+                        {<<"Subject">>, <<"This is a test">>}
+                    ],
+                    #{}, [
+                        {<<"text">>, <<"html">>, [], #{},
+                            <<"This is a multipart message with no non-ascii characters\r\nso there">>}
+                    ]},
+            Encoded4 = encode(Email4),
+            Result4 = decode(Encoded4),
+            ?assertMatch(
+                <<"text/html;charset=us-ascii">>,
+                proplists:get_value(<<"Content-Type">>, element(3, lists:nth(1, element(5, Result4))))
+            )
+        end},
+        {"A boundary should be generated if applicable", fun() ->
+            Email =
+                {<<"multipart">>, <<"alternative">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"To">>, <<"you@example.com">>},
+                        {<<"Subject">>, <<"This is a test">>}
+                    ],
+                    #{}, [
+                        {<<"text">>, <<"plain">>, [], #{},
+                            <<"This message contains rich text.\r\n", "and is =quoted printable= encoded!">>},
+                        {<<"text">>, <<"html">>, [], #{},
+                            <<"<html><body>This message also contains", "HTML and is base64",
+                                "encoded\r\n\r\n</body></html>">>}
+                    ]},
+            Encoded = encode(Email),
+            Result = decode(Encoded),
+            Boundary = proplists:get_value(<<"boundary">>, maps:get(content_type_params, element(4, Result))),
+            ?assert(is_binary(Boundary)),
+            % ensure we don't add the header multiple times
+            ?assertEqual(1, length(proplists:get_all_values(<<"Content-Type">>, element(3, Result)))),
+            % headers should be appended, not prepended
+            ?assertMatch({<<"From">>, _}, lists:nth(1, element(3, Result))),
+            ok
+        end}
+    ].
+
+roundtrip_test_() ->
+    [
+        {"roundtrip test for the gamut", fun() ->
+            {ok, Email} = file:read_file("test/smtp/fixtures/the-gamut.eml"),
+            Decoded = decode(Email),
+            _Encoded = encode(Decoded),
+            %{ok, F1} = file:open("f1", [write]),
+            %{ok, F2} = file:open("f2", [write]),
+            %file:write(F1, Email),
+            %file:write(F2, Encoded),
+            %file:close(F1),
+            %file:close(F2),
+            %?assertEqual(Email, Email),
+            ok
+        end},
+        {"round trip plain text only email", fun() ->
+            {ok, Email} = file:read_file("test/smtp/fixtures/Plain-text-only.eml"),
+            Decoded = decode(Email),
+            _Encoded = encode(Decoded),
+            %{ok, F1} = file:open("f1", [write]),
+            %{ok, F2} = file:open("f2", [write]),
+            %file:write(F1, Email),
+            %file:write(F2, Encoded),
+            %file:close(F1),
+            %file:close(F2),
+            %?assertEqual(Email, Email),
+            ok
+        end},
+        {"round trip quoted-printable email", fun() ->
+            {ok, Email} = file:read_file("test/smtp/fixtures/testcase1"),
+            Decoded = decode(Email),
+            _Encoded = encode(Decoded),
+            %{ok, F1} = file:open("f1", [write]),
+            %{ok, F2} = file:open("f2", [write]),
+            %file:write(F1, Email),
+            %file:write(F2, Encoded),
+            %file:close(F1),
+            %file:close(F2),
+            %?assertEqual(Email, Email),
+            ok
+        end}
+    ].
+
+dkim_canonicalization_test_() ->
+    %% * canonicalization from #3.4.5
+    Hdrs = [
+        <<"A : X\r\n">>,
+        <<"B : Y\t\r\n\tZ  \r\n">>
+    ],
+    Body = <<" C \r\nD \t E\r\n\r\n\r\n">>,
+    [
+        {"Simple body canonicalization", fun() ->
+            ?assertEqual(<<" C \r\nD \t E\r\n">>, dkim_canonicalize_body(Body, simple)),
+            ?assertEqual(<<"\r\n">>, dkim_canonicalize_body(<<>>, simple)),
+            ?assertEqual(<<"\r\n">>, dkim_canonicalize_body(<<"\r\n\r\n\r\n">>, simple)),
+            ?assertEqual(<<"A\r\n\r\nB\r\n">>, dkim_canonicalize_body(<<"A\r\n\r\nB\r\n\r\n">>, simple))
+        end},
+        {"Simple headers canonicalization", fun() ->
+            ?assertEqual(
+                [
+                    <<"A : X\r\n">>,
+                    <<"B : Y\t\r\n\tZ  \r\n">>
+                ],
+                dkim_canonicalize_headers(Hdrs, simple)
+            )
+        end},
+        {"Relaxed headers canonicalization", fun() ->
+            % \r\n's are stripped by current impl.
+            ?assertEqual(
+                [
+                    <<"a:X">>,
+                    <<"b:Y Z">>
+                ],
+                dkim_canonicalize_headers(Hdrs, relaxed)
+            )
+        end}
+    ].
+
+dkim_sign_rsa_test_() ->
+    %% * sign using test/smtp/fixtures/dkim*.pem
+    {ok, PrivKey} = file:read_file("test/smtp/fixtures/dkim-rsa-private.pem"),
+    [
+        {"Sign simple", fun() ->
+            Email =
+                {<<"text">>, <<"plain">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"Subject">>, <<"Hello world!">>},
+                        {<<"Date">>, <<"Thu, 28 Nov 2013 04:15:44 +0400">>},
+                        {<<"Message-ID">>, <<"the-id">>},
+                        {<<"Content-Type">>, <<"text/plain; charset=utf-8">>}
+                    ],
+                    #{}, <<"123">>},
+            Options = [
+                {dkim, [
+                    {s, <<"foo.bar">>},
+                    {d, <<"example.com">>},
+                    {c, {simple, simple}},
+                    {t, {{2014, 2, 4}, {23, 15, 00}}},
+                    {x, {{2114, 2, 4}, {23, 15, 00}}},
+                    {private_key, {pem_plain, PrivKey}}
+                ]}
+            ],
+
+            Enc = encode(Email, Options),
+            %% This `Enc' value can be verified, for example, by Python script
+            %% https://launchpad.net/dkimpy like:
+            %% >>> pubkey = ''.join(open("test/smtp/fixtures/dkim-rsa-public.pem").read().splitlines()[1:-1])
+            %% >>> dns_mock = lambda *args: 'v=DKIM1; g=*; k=rsa; p=' + pubkey
+            %% >>> import dkim
+            %% >>> d = dkim.DKIM(mime_message) % pass `Enc' value as 1'st argument
+            %% >>> d.verify(dnsfunc=dns_mock)
+            %% True
+            {_, _, [{DkimHdrName, DkimHdrVal} | _], _, _} = decode(Enc),
+            ?assertEqual(<<"DKIM-Signature">>, DkimHdrName),
+            ?assertEqual(
+                <<
+                    "t=1391555700; x=4547229300; s=foo.bar; h=from:to:subject:date; d=example.com; c=simple/simple; "
+                    "bh=Afm/S7SaxS19en1h955RwsupTF914DQUPqYU8Nh7kpw=; a=rsa-sha256; v=1; "
+                    "b=Mtja7WpVvtOFT8rfzOS/2fRZ492jrgsHgD5YUl5zmPQ/NEEMjVhVX0JCkfZxWpxiKe"
+                    "qwl7nTJy3xecdg12feGT1rGC+rV0vAX8LVc+AJ4T4A50hE8L4hpJ1Tv5rt2O2t0Xu1Wx"
+                    "yH6Cmrhhh56istjL+ba+U1EHhV7uZXGpWXGa4="
+                >>,
+                DkimHdrVal
+            )
+        end},
+        {"Sign relaxed headers, simple body", fun() ->
+            Email =
+                {<<"text">>, <<"plain">>,
+                    [
+                        {<<"From">>, <<"me@example.com">>},
+                        {<<"Subject">>, <<"Hello world!">>},
+                        {<<"Date">>, <<"Thu, 28 Nov 2013 04:15:44 +0400">>},
+                        {<<"Message-ID">>, <<"the-id-relaxed">>},
+                        {<<"Content-Type">>, <<"text/plain; charset=utf-8">>}
+                    ],
+                    #{}, <<"123">>},
+            Options = [
+                {dkim, [
+                    {s, <<"foo.bar">>},
+                    {d, <<"example.com">>},
+                    {c, {relaxed, simple}},
+                    {private_key, {pem_plain, PrivKey}}
+                ]}
+            ],
+
+            Enc = encode(Email, Options),
+            {_, _, [{DkimHdrName, DkimHdrVal} | _], _, _} = decode(Enc),
+            ?assertEqual(<<"DKIM-Signature">>, DkimHdrName),
+            ?assertEqual(
+                <<
+                    "s=foo.bar; h=from:to:subject:date; d=example.com; c=relaxed/simple; "
+                    "bh=Afm/S7SaxS19en1h955RwsupTF914DQUPqYU8Nh7kpw=; a=rsa-sha256; v=1; "
+                    "b=dXxKq6A7m4A3AoS90feuLP+IxOyXFTPIibja52E2JCAyOsxvIGlI51xR1LvmEaelv9"
+                    "jJTH9iGyAC7RzTKxrWV1QXayvr05bsTy3vDw7P4vfZ1gmspuP/3Icw+J8KEn+p6+CRrf"
+                    "T97QadH42PT6XmO2v01q5nhMgNE4yQyf9DBJs="
+                >>,
+                DkimHdrVal
+            )
+        end}
+    ].
+
+dkim_sign_ed25519_test_() ->
+    case ed25519_supported() of
+        true ->
+            %% * sign using test/smtp/fixtures/dkim*.pem
+            {ok, PrivKey} = file:read_file("test/smtp/fixtures/dkim-ed25519-private.pem"),
+            [
+                {"Sign simple", fun() ->
+                    Email =
+                        {<<"text">>, <<"plain">>,
+                            [
+                                {<<"From">>, <<"me@example.com">>},
+                                {<<"Subject">>, <<"Hello world!">>},
+                                {<<"Date">>, <<"Thu, 28 Nov 2013 04:15:44 +0400">>},
+                                {<<"Message-ID">>, <<"the-id">>},
+                                {<<"Content-Type">>, <<"text/plain; charset=utf-8">>}
+                            ],
+                            #{}, <<"123">>},
+                    Options = [
+                        {dkim, [
+                            {s, <<"foo.bar">>},
+                            {d, <<"example.com">>},
+                            {c, {simple, simple}},
+                            {a, 'ed25519-sha256'},
+                            {t, {{2014, 2, 4}, {23, 15, 00}}},
+                            {x, {{2114, 2, 4}, {23, 15, 00}}},
+                            {private_key, {pem_plain, PrivKey}}
+                        ]}
+                    ],
+
+                    Enc = encode(Email, Options),
+                    %% This `Enc' value can be verified, for example, by Python script
+                    %% https://launchpad.net/dkimpy like:
+                    %% >>> pubkey = ''.join(open("test/smtp/fixtures/dkim-ed25519-public.pem").read().splitlines()[1:-1])
+                    %% >>> dns_mock = lambda *args: 'v=DKIM1; g=*; k=ed25519; p=' + pubkey
+                    %% >>> import dkim
+                    %% >>> d = dkim.DKIM(mime_message) % pass `Enc' value as 1'st argument
+                    %% >>> d.verify(dnsfunc=dns_mock)
+                    %% True
+                    {_, _, [{DkimHdrName, DkimHdrVal} | _], _, _} = decode(Enc),
+                    ?assertEqual(<<"DKIM-Signature">>, DkimHdrName),
+                    ?assertEqual(
+                        <<
+                            "t=1391555700; x=4547229300; s=foo.bar; h=from:to:subject:date; d=example.com; c=simple/simple; "
+                            "bh=Afm/S7SaxS19en1h955RwsupTF914DQUPqYU8Nh7kpw=; a=ed25519-sha256; v=1; "
+                            "b=bFPndkFlgpFbfVKBF9HiVkQQF/3ojOQT7ycrZYp0yYe4oyItUQexlvd+Q7BviiHv/seLVBESpBjLbthbfb5HDA=="
+                        >>,
+                        DkimHdrVal
+                    )
+                end},
+                {"Sign relaxed headers, simple body", fun() ->
+                    Email =
+                        {<<"text">>, <<"plain">>,
+                            [
+                                {<<"From">>, <<"me@example.com">>},
+                                {<<"Subject">>, <<"Hello world!">>},
+                                {<<"Date">>, <<"Thu, 28 Nov 2013 04:15:44 +0400">>},
+                                {<<"Message-ID">>, <<"the-id-relaxed">>},
+                                {<<"Content-Type">>, <<"text/plain; charset=utf-8">>}
+                            ],
+                            #{}, <<"123">>},
+                    Options = [
+                        {dkim, [
+                            {s, <<"foo.bar">>},
+                            {d, <<"example.com">>},
+                            {c, {relaxed, simple}},
+                            {a, 'ed25519-sha256'},
+                            {private_key, {pem_plain, PrivKey}}
+                        ]}
+                    ],
+
+                    Enc = encode(Email, Options),
+                    {_, _, [{DkimHdrName, DkimHdrVal} | _], _, _} = decode(Enc),
+                    ?assertEqual(<<"DKIM-Signature">>, DkimHdrName),
+                    ?assertEqual(
+                        <<
+                            "s=foo.bar; h=from:to:subject:date; d=example.com; c=relaxed/simple; "
+                            "bh=Afm/S7SaxS19en1h955RwsupTF914DQUPqYU8Nh7kpw=; a=ed25519-sha256; v=1; "
+                            "b=f7wORU/qmPr4q891m5zmZMadPm9n9e596mBJHBD6tE51PAl4pHdpw9xRC1kwLGmxPTEK5SiQluPVTbDHVhVZBQ=="
+                        >>,
+                        DkimHdrVal
+                    )
+                end}
+            ];
+        false ->
+            []
+    end.
+
+dkim_sign_ed25519_encrypted_key_test_() ->
+    case ed25519_supported() of
+        true ->
+            %% * sign using test/smtp/fixtures/dkim*.pem
+            {ok, EncryptedPrivKey} =
+                file:read_file("test/smtp/fixtures/dkim-ed25519-encrypted-private.pem"),
+            [
+                {"Sign encrypted", fun() ->
+                    Email =
+                        {<<"text">>, <<"plain">>,
+                            [
+                                {<<"From">>, <<"me@example.com">>},
+                                {<<"Subject">>, <<"Hello world!">>},
+                                {<<"Date">>, <<"Thu, 28 Nov 2013 04:15:44 +0400">>},
+                                {<<"Message-ID">>, <<"the-id">>},
+                                {<<"Content-Type">>, <<"text/plain; charset=utf-8">>}
+                            ],
+                            #{}, <<"123">>},
+                    Options = [
+                        {dkim, [
+                            {s, <<"foo.bar">>},
+                            {d, <<"example.com">>},
+                            {c, {simple, simple}},
+                            {a, 'ed25519-sha256'},
+                            {t, {{2014, 2, 4}, {23, 15, 00}}},
+                            {x, {{2114, 2, 4}, {23, 15, 00}}},
+                            {private_key, {pem_encrypted, EncryptedPrivKey, "password"}}
+                        ]}
+                    ],
+
+                    Enc = encode(Email, Options),
+                    %% This `Enc' value can be verified, for example, by Python script
+                    %% https://launchpad.net/dkimpy like:
+                    %% >>> pubkey = ''.join(open("test/smtp/fixtures/dkim-ed25519-public.pem").read().splitlines()[1:-1])
+                    %% >>> dns_mock = lambda *args: 'v=DKIM1; g=*; k=ed25519; p=' + pubkey
+                    %% >>> import dkim
+                    %% >>> d = dkim.DKIM(mime_message) % pass `Enc' value as 1'st argument
+                    %% >>> d.verify(dnsfunc=dns_mock)
+                    %% True
+                    {_, _, [{DkimHdrName, DkimHdrVal} | _], _, _} = decode(Enc),
+                    ?assertEqual(<<"DKIM-Signature">>, DkimHdrName),
+                    ?assertEqual(
+                        <<
+                            "t=1391555700; x=4547229300; s=foo.bar; h=from:to:subject:date; d=example.com; c=simple/simple; "
+                            "bh=Afm/S7SaxS19en1h955RwsupTF914DQUPqYU8Nh7kpw=; a=ed25519-sha256; v=1; "
+                            "b=JgsuW5OmKPk188YRmxs1cLA8mrAf9FNC+s/PYK7Vat7HF4l7FglcoWWHqm0/Cg7o/V+8bP1RNwes1xDKS8/wDQ=="
+                        >>,
+                        DkimHdrVal
+                    )
+                end}
+            ];
+        false ->
+            []
+    end.
+

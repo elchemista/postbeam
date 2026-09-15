@@ -1,0 +1,11 @@
+Postbeam includes an adapted copy of the Elixir conversion of gen_smtp.
+
+The SMTP/LMTP client and server, MIME codec, DKIM signer, socket utilities,
+RFC grammars and regression tests originate from gen_smtp:
+https://github.com/gen-smtp/gen_smtp
+
+The integrated version lives under Postbeam.SMTP and is built as part of the
+postbeam application. The original module copyright notices are retained.
+The BSD-2-Clause and MIT license texts are in licenses/.
+
+Postbeam's original code remains licensed under Apache-2.0 (see LICENSE).

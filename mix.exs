@@ -6,13 +6,19 @@ defmodule Postbeam.MixProject do
       app: :postbeam,
       version: "0.1.0",
       elixir: "~> 1.19",
+      compilers: [:yecc, :leex] ++ Mix.compilers(),
+      erlc_paths: ["src"],
       elixirc_paths: elixirc_paths(Mix.env()),
       test_coverage: [
         summary: [threshold: 80],
         ignore_modules: [
+          :postbeam_smtp_rfc822_parse,
+          :postbeam_smtp_rfc5322_parse,
+          :postbeam_smtp_rfc5322_scan,
           Postbeam.TestDNS,
           Postbeam.TestTransport,
           Postbeam.TestReceiver,
+          Postbeam.TestInboundAdapter,
           Postbeam.TestDNSServer,
           Postbeam.TestMailer,
           Postbeam.SecondTestMailer,
@@ -29,22 +35,29 @@ defmodule Postbeam.MixProject do
           "docs/swoosh.md",
           "docs/configuration.md",
           "docs/delivery.md",
+          "docs/inbound.md",
           "docs/domain-setup.md",
           "docs/dkim.md",
-          "docs/adapters.md"
+          "docs/adapters.md",
+          "docs/smtp.md"
         ]
       ],
-      description: "A small outbound SMTP sender that delivers directly to recipient MX servers",
+      description:
+        "Direct-to-MX SMTP delivery and incoming email with application-owned adapters",
       package: [
-        licenses: ["Apache-2.0"],
+        licenses: ["Apache-2.0", "BSD-2-Clause", "MIT"],
         links: %{"GitHub" => "https://github.com/elchemista/postbeam"},
         files: [
           "lib",
+          "src/*.xrl",
+          "src/*.yrl",
+          "licenses",
           "examples",
           "docs",
           "mix.exs",
           "README.md",
           "LICENSE",
+          "NOTICE",
           ".formatter.exs",
           ".credo.exs"
         ]
@@ -54,12 +67,16 @@ defmodule Postbeam.MixProject do
 
   def application,
     do: [
-      extra_applications: [:logger, :crypto, :public_key, :ssl]
+      mod: {Postbeam.Application, []},
+      extra_applications:
+        [:logger, :crypto, :public_key, :ssl] ++ if(Mix.env() == :test, do: [:eunit], else: [])
     ]
 
   defp deps do
     [
-      {:gen_smtp, "~> 1.3.0"},
+      {:ranch, "~> 2.1"},
+      {:eiconv, "~> 1.0", optional: true},
+      {:proper, "~> 1.4", only: :test, runtime: false},
       {:swoosh, "~> 1.28", optional: true},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},

@@ -19,6 +19,9 @@ defmodule Postbeam do
 
   Implement `Postbeam.MX` or `Postbeam.SMTP` to replace DNS or transport without
   changing callers, message encoding, or the MX fallback policy.
+
+  To receive email, add a `Postbeam.Inbound` listener with your own adapter.
+  Incoming messages are handed to your application without built-in storage.
   """
 
   alias Postbeam.Config

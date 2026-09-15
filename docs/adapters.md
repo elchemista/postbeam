@@ -55,5 +55,13 @@ Return `{:ok, receipt}` or `{:error, {classification, reason}}`:
 
 Custom transports own address resolution, deadlines and socket cleanup.
 Exceptions propagate. Never classify an ambiguous disconnect as safe to retry.
-The default transport delegates the protocol to `gen_smtp`, with a monitored
+The default transport uses the built-in `Postbeam.SMTP.Client`, with a monitored
 process and a hard deadline for each IP attempt.
+
+## Incoming email
+
+Implement `Postbeam.Inbound` to choose accepted recipients and handle complete
+incoming messages. Its `accept_recipient/2` and `handle_message/2` callbacks
+receive your adapter options. There is no default message store or forwarding
+destination: the application owns every side effect and the acceptance decision.
+See [receiving email](inbound.md) for a complete example and SMTP error semantics.

@@ -6,7 +6,7 @@ defmodule Postbeam.SMTP do
   `:retry` allows another MX, `:permanent` stops delivery, `:uncertain` stops
   delivery because the server may already have accepted the message.
 
-  The default adapter tries every A/AAAA address using `:gen_smtp_client`. Each address attempt owns its sockets in a short-lived
+  The default adapter tries every A/AAAA address using `Postbeam.SMTP.Client`. Each address attempt owns its sockets in a short-lived
   monitored process with a hard `smtp_timeout` (including connection and TLS).
   `connect_timeout` additionally bounds each TCP connection.
   """
@@ -104,17 +104,17 @@ defmodule Postbeam.SMTP do
           Config.t()
         ) :: term()
   defp transact(parent, token, address, host, message, config) do
-    case :gen_smtp_client.open(options(address, host, config)) do
+    case Postbeam.SMTP.Client.open(options(address, host, config)) do
       {:ok, socket} ->
         send(parent, {token, :envelope})
 
         body = fn ->
-          # gen_smtp evaluates the body before issuing DATA, not after 354.
+          # The client evaluates the body before issuing DATA, not after 354.
           send(parent, {token, :data})
           message.data
         end
 
-        :gen_smtp_client.deliver(socket, {message.from, [message.to], body})
+        Postbeam.SMTP.Client.deliver(socket, {message.from, [message.to], body})
 
       error ->
         error

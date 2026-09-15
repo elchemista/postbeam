@@ -41,7 +41,7 @@ dkim: [
 
 Encrypted PEM uses `{:pem_encrypted, pem, ~c"password"}`. RSA-SHA256 is the default;
 explicit Ed25519 keys support `a: :"ed25519-sha256"`. MIME and DKIM signing are
-handled by `gen_smtp`. Signature bytes remain unchanged across MX attempts and
+handled by `Postbeam.SMTP.MIME` and `Postbeam.SMTP.DKIM`. Signature bytes remain unchanged across MX attempts and
 Swoosh recipients.
 
 ## Custom persistence

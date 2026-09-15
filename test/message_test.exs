@@ -68,7 +68,10 @@ defmodule Postbeam.MessageTest do
     {:ok, config} = Config.new([])
     {:ok, message} = Message.new(%{@fields | subject: String.duplicate("☕", 100), text: body})
     {:ok, encoded} = Message.encode(message, config)
-    assert {"text", "plain", headers, _, ^body} = :mimemail.decode(encoded.data, encoding: :none)
+
+    assert {"text", "plain", headers, _, ^body} =
+             Postbeam.SMTP.MIME.decode(encoded.data, encoding: :none)
+
     assert {"Content-Transfer-Encoding", "base64"} in headers
     assert Enum.all?(String.split(encoded.data, "\r\n"), &(byte_size(&1) <= 998))
     assert Enum.all?(:binary.bin_to_list(encoded.data), &(&1 < 128))

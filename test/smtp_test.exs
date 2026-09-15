@@ -39,7 +39,7 @@ defmodule Postbeam.SMTPTest do
                     "RCPT TO:<user@example.net>\r\n", mime}
 
     assert mime =~ "Message-ID: #{id}"
-    assert {"text", "plain", _, _, "Caffè ☕"} = :mimemail.decode(mime, encoding: :none)
+    assert {"text", "plain", _, _, "Caffè ☕"} = Postbeam.SMTP.MIME.decode(mime, encoding: :none)
     TestReceiver.done(token)
   end
 

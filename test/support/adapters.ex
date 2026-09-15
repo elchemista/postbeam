@@ -63,14 +63,14 @@ defmodule Postbeam.TestReceiver do
   end
 
   def command(socket, prefix, reply) do
-    {:ok, line} = :smtp_socket.recv(socket, 0, 3_000)
+    {:ok, line} = Postbeam.SMTP.Socket.recv(socket, 0, 3_000)
     assert String.starts_with?(line, prefix), "Expected #{prefix}, got #{inspect(line)}"
-    if reply, do: :smtp_socket.send(socket, reply <> "\r\n")
+    if reply, do: Postbeam.SMTP.Socket.send(socket, reply <> "\r\n")
     line
   end
 
   def greet(socket) do
-    :smtp_socket.send(socket, "220 local.test ESMTP\r\n")
+    Postbeam.SMTP.Socket.send(socket, "220 local.test ESMTP\r\n")
     command(socket, "EHLO mta.example.com", "250-local.test\r\n250 AUTH PLAIN")
   end
 
@@ -86,7 +86,7 @@ defmodule Postbeam.TestReceiver do
   end
 
   defp read_data(socket, acc) do
-    case :smtp_socket.recv(socket, 0, 3_000) do
+    case Postbeam.SMTP.Socket.recv(socket, 0, 3_000) do
       {:ok, ".\r\n"} -> acc |> Enum.reverse() |> IO.iodata_to_binary()
       {:ok, line} -> read_data(socket, [line | acc])
       other -> flunk("Incomplete message: #{inspect(other)}")

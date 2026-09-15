@@ -295,7 +295,7 @@ defmodule Postbeam.SwooshTest do
                     "RCPT TO:<user@example.net>\r\n", data}
 
     assert data =~ "Message-ID: #{id}"
-    assert {"text", "plain", _, _, "Caffè ☕"} = :mimemail.decode(data, encoding: :none)
+    assert {"text", "plain", _, _, "Caffè ☕"} = Postbeam.SMTP.MIME.decode(data, encoding: :none)
     Postbeam.TestReceiver.done(token)
   end
 
@@ -322,7 +322,7 @@ defmodule Postbeam.SwooshTest do
   defp deliver(email), do: TestMailer.deliver(email, postbeam: @options)
 
   @spec decode(Postbeam.Message.encoded()) :: tuple()
-  defp decode(message), do: :mimemail.decode(message.data, encoding: :none)
+  defp decode(message), do: Postbeam.SMTP.MIME.decode(message.data, encoding: :none)
 
   @spec header_value(Postbeam.Headers.t(), String.t()) :: String.t() | nil
   defp header_value(headers, name) do

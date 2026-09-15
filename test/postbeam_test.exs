@@ -155,7 +155,7 @@ defmodule PostbeamTest do
       fields = @message |> Map.new() |> Map.delete(:text) |> Map.merge(bodies)
       assert {:ok, _} = Postbeam.deliver(fields, @options)
       assert_receive {:attempt, _, message, _}
-      {type, subtype, headers, _, body} = :mimemail.decode(message.data, encoding: :none)
+      {type, subtype, headers, _, body} = Postbeam.SMTP.MIME.decode(message.data, encoding: :none)
       assert {"Subject", "=?UTF-8?Q?Caff=C3=A8_=E2=98=95?="} in headers
       assert {"Message-ID", message.message_id} in headers
 

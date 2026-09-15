@@ -56,8 +56,11 @@ defmodule Postbeam.Config do
   @spec new(term()) :: {:ok, t()} | {:error, error()}
   def new(options) do
     with {:ok, options} <- keyword(options, :config) do
+      # Supervisor limits are application settings, not per-message options.
+      defaults = Application.get_all_env(:postbeam) |> Keyword.delete(:max_outbound_connections)
+
       config =
-        @defaults |> Keyword.merge(Application.get_all_env(:postbeam)) |> Keyword.merge(options)
+        @defaults |> Keyword.merge(defaults) |> Keyword.merge(options)
 
       case Enum.find(config, &invalid_option?/1) do
         nil -> {:ok, config}
