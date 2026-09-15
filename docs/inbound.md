@@ -79,12 +79,23 @@ outgoing `config :postbeam` settings.
 | `:address` | `{127, 0, 0, 1}` | Local IPv4 or IPv6 bind address |
 | `:port` | `2525` | SMTP port; `0` selects an ephemeral port |
 | `:max_size` | `10_485_760` | Maximum incoming message size in bytes, for both HELO and EHLO |
+| `:max_recipients` | `100` | Maximum accepted recipients per transaction; additional RCPT commands receive `452` |
+| `:max_connections` | `1024` | Ranch connection limit per connection supervisor; also accepts `:infinity` |
+| `:num_acceptors` | `10` | Number of Ranch acceptors |
+| `:session_timeout` | `180_000` | Timeout waiting for the next SMTP command or completion of DATA, ms |
+| `:tls_timeout` | `5_000` | STARTTLS handshake deadline, ms |
+| `:allow_bare_newlines` | `false` | Reject bare CR/LF in DATA; `:ignore` preserves them, `:fix` normalizes to CRLF, `:strip` removes them |
 | `:tls_options` | `[]` | TLS server options; nonempty options enable STARTTLS advertisement |
 
 Unknown options, duplicate keys, invalid values and missing callbacks are
 rejected before opening a socket. No listener is started by simply adding the
 library dependency. `Postbeam.Inbound.start_link/1` is also available for a
 manually managed linked listener.
+
+Recipient limits reset after DATA or RSET, and accepted recipients retain their
+original order. `:session_timeout` does not interrupt synchronous adapter
+callbacks; adapters must set deadlines on their own I/O. By default, MIME bytes
+are preserved. Selecting `:fix` or `:strip` explicitly permits newline rewriting.
 
 ## Message fields
 

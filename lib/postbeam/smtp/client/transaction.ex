@@ -44,7 +44,14 @@ defmodule Postbeam.SMTP.Client.Transaction do
   defp send_body(socket, body, options) do
     command(socket, "DATA\r\n", options, ["354"])
     escaped_body = :re.replace(body, "^\\.", "..", [:global, :multiline, return: :binary])
-    Socket.send(socket, [escaped_body, "\r\n.\r\n"])
+    Socket.send(socket, [escaped_body, terminator(escaped_body)])
+  end
+
+  @spec terminator(binary()) :: binary()
+  defp terminator(""), do: ".\r\n"
+
+  defp terminator(body) do
+    if String.ends_with?(body, "\r\n"), do: ".\r\n", else: "\r\n.\r\n"
   end
 
   @spec receipt(Socket.socket(), [Client.email_address()], Client.options()) ::

@@ -43,6 +43,36 @@ defmodule Postbeam.SMTPTest do
     TestReceiver.done(token)
   end
 
+  test "DATA adds only the framing CRLF needed by the message" do
+    for body <- ["", "Hello", "Hello\r\n", "Hello\r\n\r\n", ".first\r\n..second\r\n"] do
+      {port, token} =
+        TestReceiver.start(fn socket, parent, token ->
+          greet(socket)
+          envelope(socket)
+          wire_body = data(socket)
+          :gen_tcp.send(socket, "250 accepted\r\n")
+          send(parent, {token, wire_body})
+        end)
+
+      assert is_binary(
+               Postbeam.SMTP.Client.send_blocking(
+                 {"sender@example.com", ["user@example.net"], body},
+                 relay: ~c"localhost",
+                 hostname: ~c"mta.example.com",
+                 port: port,
+                 tls: :never,
+                 auth: :never,
+                 no_mx_lookups: true
+               )
+             )
+
+      assert_receive {^token, received}
+      expected = if body == "" or String.ends_with?(body, "\r\n"), do: body, else: body <> "\r\n"
+      assert received == Regex.replace(~r/^\./m, expected, "..")
+      TestReceiver.done(token)
+    end
+  end
+
   test "tries next MX when its predecessor is unreachable" do
     TestDNS.put("example.net", :mx, {:ok, [{1, "bad.test"}, {2, "good.test"}]})
     TestDNS.put("bad.test", :a, {:ok, [{127, 0, 0, 2}]})
@@ -257,7 +287,24 @@ defmodule Postbeam.SMTPTest do
           ip: address
         )
 
-      result = deliver(port, tls: :always, tls_options: [cacerts: certificate[:cacerts]])
+      ca_file =
+        Path.join(System.tmp_dir!(), "postbeam-ca-#{System.unique_integer([:positive])}.pem")
+
+      File.write!(
+        ca_file,
+        :public_key.pem_encode(
+          Enum.map(certificate[:cacerts], &{:Certificate, &1, :not_encrypted})
+        )
+      )
+
+      on_exit(fn -> File.rm(ca_file) end)
+
+      tls_options =
+        if address == ipv6,
+          do: [cacerts: certificate[:cacerts]],
+          else: [cacertfile: String.to_charlist(ca_file)]
+
+      result = deliver(port, tls: :always, tls_options: tls_options)
       TestReceiver.done(token)
 
       if expected == :ok do
@@ -265,6 +312,33 @@ defmodule Postbeam.SMTPTest do
       else
         assert {:error, {:exhausted, _}} = result
       end
+    end
+  end
+
+  test "a stalled TLS handshake observes tls_timeout instead of a fixed five seconds" do
+    {port, token} =
+      TestReceiver.start(fn socket, _, _ ->
+        :gen_tcp.send(socket, "220 local.test ESMTP\r\n")
+        command(socket, "EHLO", "250-local.test\r\n250 STARTTLS")
+        command(socket, "STARTTLS", "220 go ahead")
+        :inet.setopts(socket, packet: :raw)
+        await_closed(socket)
+      end)
+
+    start = System.monotonic_time(:millisecond)
+
+    assert {:error, {:exhausted, _}} =
+             deliver(port, tls: :always, tls_timeout: 80, smtp_timeout: 2000)
+
+    assert System.monotonic_time(:millisecond) - start < 1500
+    TestReceiver.done(token)
+  end
+
+  defp await_closed(socket) do
+    case :gen_tcp.recv(socket, 0, 2000) do
+      {:ok, _} -> await_closed(socket)
+      {:error, :closed} -> :ok
+      other -> flunk("Expected socket closure, got #{inspect(other)}")
     end
   end
 

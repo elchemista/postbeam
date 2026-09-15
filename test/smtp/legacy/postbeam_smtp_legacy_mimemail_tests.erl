@@ -1753,6 +1753,7 @@ dkim_canonicalization_test_() ->
         end}
     ].
 
+%% Keep the original header set explicit for these published signature vectors.
 dkim_sign_rsa_test_() ->
     %% * sign using test/smtp/fixtures/dkim*.pem
     {ok, PrivKey} = file:read_file("test/smtp/fixtures/dkim-rsa-private.pem"),
@@ -1770,6 +1771,7 @@ dkim_sign_rsa_test_() ->
                     #{}, <<"123">>},
             Options = [
                 {dkim, [
+                    {h, [<<"from">>, <<"to">>, <<"subject">>, <<"date">>]},
                     {s, <<"foo.bar">>},
                     {d, <<"example.com">>},
                     {c, {simple, simple}},
@@ -1814,6 +1816,7 @@ dkim_sign_rsa_test_() ->
                     #{}, <<"123">>},
             Options = [
                 {dkim, [
+                    {h, [<<"from">>, <<"to">>, <<"subject">>, <<"date">>]},
                     {s, <<"foo.bar">>},
                     {d, <<"example.com">>},
                     {c, {relaxed, simple}},
@@ -1856,6 +1859,7 @@ dkim_sign_ed25519_test_() ->
                             #{}, <<"123">>},
                     Options = [
                         {dkim, [
+                            {h, [<<"from">>, <<"to">>, <<"subject">>, <<"date">>]},
                             {s, <<"foo.bar">>},
                             {d, <<"example.com">>},
                             {c, {simple, simple}},
@@ -1899,6 +1903,7 @@ dkim_sign_ed25519_test_() ->
                             #{}, <<"123">>},
                     Options = [
                         {dkim, [
+                            {h, [<<"from">>, <<"to">>, <<"subject">>, <<"date">>]},
                             {s, <<"foo.bar">>},
                             {d, <<"example.com">>},
                             {c, {relaxed, simple}},
@@ -1944,6 +1949,7 @@ dkim_sign_ed25519_encrypted_key_test_() ->
                             #{}, <<"123">>},
                     Options = [
                         {dkim, [
+                            {h, [<<"from">>, <<"to">>, <<"subject">>, <<"date">>]},
                             {s, <<"foo.bar">>},
                             {d, <<"example.com">>},
                             {c, {simple, simple}},

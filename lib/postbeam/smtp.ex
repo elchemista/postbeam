@@ -12,6 +12,8 @@ defmodule Postbeam.SMTP do
   """
 
   alias Postbeam.SMTP.Client
+  alias Postbeam.SMTP.Delivery
+  alias Postbeam.SMTP.TLS
 
   alias Postbeam.Config
   alias Postbeam.Message
@@ -72,10 +74,12 @@ defmodule Postbeam.SMTP do
     parent = self()
     token = make_ref()
 
-    {pid, monitor} =
-      spawn_monitor(__MODULE__, :run_session, [parent, token, address, host, message, config])
-
-    await(pid, monitor, token, :connect)
+    case Delivery.start_monitor(fn ->
+           run_session(parent, token, address, host, message, config)
+         end) do
+      {:ok, pid, monitor} -> await(pid, monitor, token, :connect)
+      {:error, reason} -> {:error, {:retry, reason}}
+    end
   end
 
   @doc false
@@ -86,7 +90,7 @@ defmodule Postbeam.SMTP do
           String.t(),
           Message.encoded(),
           Config.t()
-        ) :: no_return()
+        ) :: :ok
   def run_session(parent, token, address, host, message, config) do
     # Also bounds socket lifetime if the caller exits unexpectedly.
     {:ok, timer} = :timer.kill_after(Keyword.fetch!(config, :smtp_timeout))
@@ -94,7 +98,8 @@ defmodule Postbeam.SMTP do
     {:ok, :cancel} = :timer.cancel(timer)
     # Worker exit releases every socket, including failed opens. QUIT errors
     # must never replace an already received acceptance or rejection.
-    exit({token, result})
+    send(parent, {token, :result, result})
+    :ok
   end
 
   @spec transact(
@@ -128,10 +133,20 @@ defmodule Postbeam.SMTP do
   @spec await(pid(), reference(), reference(), phase()) :: result()
   defp await(pid, monitor, token, phase) do
     receive do
-      {^token, next_phase} -> await(pid, monitor, token, next_phase)
-      {:DOWN, ^monitor, :process, ^pid, {^token, result}} -> classify(result, phase)
-      {:DOWN, ^monitor, :process, ^pid, :killed} -> classify({:error, :timeout}, phase)
-      {:DOWN, ^monitor, :process, ^pid, reason} -> classify({:error, {:exit, reason}}, phase)
+      {^token, next_phase} ->
+        await(pid, monitor, token, next_phase)
+
+      {^token, :result, result} ->
+        # Wait for termination so the transport has released all owned sockets.
+        receive do
+          {:DOWN, ^monitor, :process, ^pid, _reason} -> classify(result, phase)
+        end
+
+      {:DOWN, ^monitor, :process, ^pid, :killed} ->
+        classify({:error, :timeout}, phase)
+
+      {:DOWN, ^monitor, :process, ^pid, reason} ->
+        classify({:error, {:exit, reason}}, phase)
     end
   end
 
@@ -157,6 +172,7 @@ defmodule Postbeam.SMTP do
       port: config[:port],
       hostname: String.to_charlist(config[:hostname]),
       timeout: config[:connect_timeout],
+      tls_timeout: Keyword.get(config, :tls_timeout, config[:connect_timeout]),
       tls: config[:tls],
       tls_options: tls_options(host, config),
       sockopts: [
@@ -187,8 +203,6 @@ defmodule Postbeam.SMTP do
       ],
       Keyword.fetch!(config, :tls_options)
     )
-    |> Keyword.put_new_lazy(:cacerts, fn ->
-      if config[:tls] == :never, do: [], else: :public_key.cacerts_get()
-    end)
+    |> TLS.client_options()
   end
 end

@@ -75,7 +75,8 @@ defmodule Postbeam.ConfigValidationTest do
 
     for option <- [
           a: :md5,
-          c: {:relaxed, :relaxed},
+          c: {:relaxed, :invalid},
+          c: {:invalid, :relaxed},
           h: [],
           h: ["subject"],
           h: ["from", "X-Bad\r\nInjected"],
@@ -97,6 +98,8 @@ defmodule Postbeam.ConfigValidationTest do
           a: :"ed25519-sha256",
           c: {:simple, :simple},
           c: {:relaxed, :simple},
+          c: {:simple, :relaxed},
+          c: {:relaxed, :relaxed},
           h: ["from", "message-id"],
           t: :now,
           x: {{2028, 2, 29}, {23, 59, 59}},

@@ -43,6 +43,12 @@ defmodule Postbeam.Inbound do
           | {:address, :inet.ip_address()}
           | {:port, 0..65_535}
           | {:max_size, pos_integer()}
+          | {:max_recipients, pos_integer()}
+          | {:max_connections, pos_integer() | :infinity}
+          | {:num_acceptors, pos_integer()}
+          | {:session_timeout, pos_integer()}
+          | {:tls_timeout, pos_integer()}
+          | {:allow_bare_newlines, false | :ignore | :fix | :strip}
           | {:tls_options, keyword()}
 
   @doc """
@@ -69,6 +75,12 @@ defmodule Postbeam.Inbound do
     address: {127, 0, 0, 1},
     port: 2525,
     max_size: 10_485_760,
+    max_recipients: 100,
+    max_connections: 1024,
+    num_acceptors: 10,
+    session_timeout: 180_000,
+    tls_timeout: 5_000,
+    allow_bare_newlines: false,
     tls_options: []
   ]
 
@@ -76,9 +88,15 @@ defmodule Postbeam.Inbound do
   Builds a supervised listener. Invalid options raise before opening a socket.
 
   `:adapter` is required. Defaults: loopback address, port 2525, hostname
-  `localhost`, 10 MiB maximum message size, and no STARTTLS. Supply server
+  `localhost`, 10 MiB maximum message size, 100 recipients per transaction,
+  and no STARTTLS. Supply server
   certificate/key options in `:tls_options` to advertise STARTTLS. Give each
   listener a distinct `:name`; use port `0` to allocate an ephemeral port.
+
+  `:max_connections` and `:num_acceptors` configure Ranch capacity.
+  `:session_timeout` (180,000 ms) bounds command/DATA waits and `:tls_timeout`
+  (5,000 ms) bounds STARTTLS. `:allow_bare_newlines` defaults to `false`;
+  `:ignore`, `:fix` and `:strip` explicitly allow other DATA newline policies.
   """
   @spec child_spec([option()]) :: Supervisor.child_spec()
   def child_spec(options) do
@@ -89,7 +107,16 @@ defmodule Postbeam.Inbound do
       address: config[:address],
       family: if(tuple_size(config[:address]) == 8, do: :inet6, else: :inet),
       port: config[:port],
-      sessionoptions: [callbackoptions: config, tls_options: config[:tls_options]]
+      max_connections: config[:max_connections],
+      num_acceptors: config[:num_acceptors],
+      sessionoptions: [
+        callbackoptions: config,
+        tls_options: config[:tls_options],
+        max_recipients: config[:max_recipients],
+        session_timeout: config[:session_timeout],
+        tls_timeout: config[:tls_timeout],
+        allow_bare_newlines: config[:allow_bare_newlines]
+      ]
     ]
 
     config[:name]
@@ -141,7 +168,16 @@ defmodule Postbeam.Inbound do
   defp valid?(:hostname, value), do: Config.domain?(value)
   defp valid?(:address, value), do: :inet.is_ip_address(value)
   defp valid?(:port, value), do: is_integer(value) and value in 0..65_535
-  defp valid?(:max_size, value), do: is_integer(value) and value > 0
+  defp valid?(:max_connections, :infinity), do: true
+
+  defp valid?(key, value)
+       when key in [:max_size, :max_recipients, :max_connections, :num_acceptors],
+       do: is_integer(value) and value > 0
+
+  defp valid?(key, value) when key in [:session_timeout, :tls_timeout],
+    do: is_integer(value) and value in 1..4_294_967_295
+
+  defp valid?(:allow_bare_newlines, value), do: value in [false, :ignore, :fix, :strip]
   defp valid?(:tls_options, value), do: match?({:ok, _}, Config.keyword(value, :tls_options))
   defp valid?(_, _), do: false
 

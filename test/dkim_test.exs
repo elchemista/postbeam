@@ -3,12 +3,17 @@ defmodule Postbeam.DKIMTest do
 
   for mode <- [:explicit, :managed, :ed25519],
       interface <- [:native, :swoosh],
-      c14n <- [:relaxed, :simple] do
-    test "#{interface} #{mode} #{c14n} DKIM signature and body hash verify against the public key" do
+      c14n <- [:relaxed, :simple],
+      body_c14n <- [:relaxed, :simple] do
+    test "#{interface} #{mode} #{c14n}/#{body_c14n} DKIM signature and body hash verify against the public key" do
       {public_key, signing_options} = signing_options(unquote(mode))
 
       signing_options =
-        Keyword.update!(signing_options, :dkim, &Keyword.put(&1, :c, {unquote(c14n), :simple}))
+        Keyword.update!(
+          signing_options,
+          :dkim,
+          &Keyword.put(&1, :c, {unquote(c14n), unquote(body_c14n)})
+        )
 
       assert {:ok, _} =
                deliver(
@@ -62,15 +67,22 @@ defmodule Postbeam.DKIMTest do
       assert tags["d"] == "example.com"
       assert tags["s"] == "test"
       assert tags["a"] == if(unquote(mode) == :ed25519, do: "ed25519-sha256", else: "rsa-sha256")
-      assert tags["c"] == "#{unquote(c14n)}/simple"
-      body_hash = :crypto.hash(:sha256, String.trim_trailing(body, "\r\n") <> "\r\n")
+      assert tags["c"] == "#{unquote(c14n)}/#{unquote(body_c14n)}"
+      body_hash = :crypto.hash(:sha256, canonical_body(body, unquote(body_c14n)))
       assert Base.decode64!(tags["bh"]) == body_hash
 
-      signed_headers =
-        for name <- String.split(tags["h"], ":") do
-          {key, value} =
-            Enum.find(Enum.reverse(headers), fn {key, _} -> String.downcase(key) == name end)
+      signed_names = tags["h"] |> String.replace(~r/\s/, "") |> String.split(":")
 
+      assert signed_names ==
+               ~w(from to cc reply-to subject date message-id mime-version content-type content-transfer-encoding)
+
+      signed_headers =
+        for name <- signed_names,
+            {key, value} <-
+              Enum.take(
+                Enum.filter(Enum.reverse(headers), fn {key, _} -> String.downcase(key) == name end),
+                1
+              ) do
           canonical(key, value, unquote(c14n)) <> "\r\n"
         end
 
@@ -161,4 +173,19 @@ defmodule Postbeam.DKIMTest do
 
   defp canonical(name, value, :relaxed),
     do: String.downcase(name) <> ":" <> (value |> String.replace(~r/[\s]+/, " ") |> String.trim())
+
+  @spec canonical_body(binary(), :simple | :relaxed) :: binary()
+  defp canonical_body(body, :simple), do: String.trim_trailing(body, "\r\n") <> "\r\n"
+
+  defp canonical_body(body, :relaxed) do
+    lines =
+      body
+      |> String.split("\r\n")
+      |> Enum.map(&(&1 |> String.replace(~r/[\t ]+/, " ") |> String.trim_trailing(" ")))
+      |> Enum.reverse()
+      |> Enum.drop_while(&(&1 == ""))
+      |> Enum.reverse()
+
+    Enum.map_join(lines, &(&1 <> "\r\n"))
+  end
 end

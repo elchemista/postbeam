@@ -43,9 +43,16 @@ defmodule Postbeam.TestReceiver do
     pid =
       spawn(fn ->
         try do
-          {:ok, socket} = :gen_tcp.accept(listener, 5_000)
-          conversation.(socket, parent, token)
-          :gen_tcp.close(socket)
+          for exchange <- List.wrap(conversation) do
+            {:ok, socket} = :gen_tcp.accept(listener, 5_000)
+
+            try do
+              exchange.(socket, parent, token)
+            after
+              :gen_tcp.close(socket)
+            end
+          end
+
           send(parent, {token, :done})
         rescue
           error -> send(parent, {token, {:failed, error, __STACKTRACE__}})

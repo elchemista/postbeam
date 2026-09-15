@@ -192,6 +192,33 @@ defmodule Postbeam.InboundTest do
     refute_receive {:inbound, _, {:message, _}}
   end
 
+  test "malformed SIZE and BODY parameters are rejected without killing or changing the session" do
+    {_, port} = listener()
+    socket = connect(port)
+
+    for parameter <- [
+          "SIZE=abc",
+          "SIZE=",
+          "SIZE=-1",
+          "SIZE=+1",
+          "SIZE=1.5",
+          "SIZE=1x",
+          "SIZE=" <> String.duplicate("9", 21),
+          "BODY=WHATEVER",
+          "BODY="
+        ] do
+      assert command(socket, "MAIL FROM:<sender@example.org> " <> parameter) =~ "501 "
+      assert command(socket, "NOOP") =~ "250 "
+      assert command(socket, "DATA") =~ "503 "
+    end
+
+    assert command(socket, "MAIL FROM:<sender@example.org> SIZE=0 BODY=7BIT") =~ "250 "
+    assert command(socket, "RCPT TO:<user@example.net>") =~ "250 "
+    send_data(socket)
+    assert reply(socket) =~ "250 "
+    assert_receive {:inbound, _, {:message, %{data: @data}}}
+  end
+
   test "preserves multipart content, attachments and non-UTF-8 data without parsing" do
     {_, port} = listener()
     socket = connect(port)
@@ -304,6 +331,60 @@ defmodule Postbeam.InboundTest do
     :gen_tcp.close(socket)
   end
 
+  test "recipient cap rejects excess recipients and resets after DATA and RSET" do
+    {_, port} = listener([], max_recipients: 3)
+    socket = connect(port)
+    assert command(socket, "RCPT TO:<early@example.net>") =~ "503 "
+    assert command(socket, "MAIL FROM:<sender@example.org>") =~ "250 "
+    recipients = ["first@example.net", "second@example.net", "third@example.net"]
+    for recipient <- recipients, do: assert(command(socket, "RCPT TO:<#{recipient}>") =~ "250 ")
+    assert command(socket, "RCPT TO:<excess@example.net>") =~ "452 "
+    refute_receive {:inbound, _, {:recipient, "excess@example.net"}}
+    send_data(socket)
+    assert reply(socket) =~ "250 "
+    assert_receive {:inbound, _, {:message, %{to: ^recipients}}}
+    envelope(socket)
+    assert command(socket, "RSET") =~ "250 "
+    envelope(socket, "other@example.org", "again@example.net")
+    send_data(socket)
+    assert reply(socket) =~ "250 "
+    assert_receive {:inbound, _, {:message, %{to: ["again@example.net"]}}}
+  end
+
+  test "default recipient cap accepts 100 recipients and rejects the next" do
+    {_, port} = listener()
+    socket = connect(port)
+    assert command(socket, "MAIL FROM:<sender@example.org>") =~ "250 "
+
+    for number <- 1..100,
+        do: assert(command(socket, "RCPT TO:<user#{number}@example.net>") =~ "250 ")
+
+    assert command(socket, "RCPT TO:<overflow@example.net>") =~ "452 "
+  end
+
+  test "listener controls reach Ranch and the session" do
+    {name, port} =
+      listener([],
+        num_acceptors: 2,
+        max_connections: 7,
+        session_timeout: 200,
+        allow_bare_newlines: :fix
+      )
+
+    assert :ranch.get_max_connections(name) == 7
+    assert :ranch.get_transport_options(name).num_acceptors == 2
+    socket = connect(port)
+    envelope(socket)
+    send_data(socket, "From: a@example.org\r\n\r\nHello\nworld\r\n")
+    assert reply(socket) =~ "250 "
+
+    assert_receive {:inbound, _,
+                    {:message, %{data: "From: a@example.org\r\n\r\nHello\r\nworld\r\n"}}}
+
+    assert reply(socket) =~ "421 "
+    assert {:error, :closed} = :gen_tcp.recv(socket, 0, 1000)
+  end
+
   test "rejects invalid or incomplete configuration before listening" do
     assert_raise ArgumentError, ~r/adapter/, fn -> Inbound.child_spec([]) end
 
@@ -324,6 +405,13 @@ defmodule Postbeam.InboundTest do
           port: 65_536,
           max_size: 0,
           max_size: :infinity,
+          max_recipients: 0,
+          max_connections: -1,
+          num_acceptors: 0,
+          session_timeout: 0,
+          session_timeout: :infinity,
+          tls_timeout: -1,
+          allow_bare_newlines: true,
           tls_options: %{},
           unknown: true
         ] do

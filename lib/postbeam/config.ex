@@ -26,7 +26,7 @@ defmodule Postbeam.Config do
           | {:tls, tls()}
           | {:tls_options, keyword()}
           | {:port, 1..65_535}
-          | {:connect_timeout | :smtp_timeout | :dns_timeout, milliseconds()}
+          | {:connect_timeout | :tls_timeout | :smtp_timeout | :dns_timeout, milliseconds()}
           | {:dns_options, keyword()}
           | {:dkim, keyword() | nil}
           | {:key_store, KeyStore.adapter()}
@@ -110,8 +110,9 @@ defmodule Postbeam.Config do
   defp valid?(:tls, value), do: value in [:always, :if_available, :never]
   defp valid?(:port, value), do: is_integer(value) and value in 1..65_535
 
-  defp valid?(key, value) when key in [:connect_timeout, :smtp_timeout, :dns_timeout],
-    do: is_integer(value) and value in 1..4_294_967_295
+  defp valid?(key, value)
+       when key in [:connect_timeout, :tls_timeout, :smtp_timeout, :dns_timeout],
+       do: is_integer(value) and value in 1..4_294_967_295
 
   defp valid?(key, value) when key in [:tls_options, :dns_options], do: keyword?(value)
   defp valid?(:resolver, value), do: adapter?(value, :lookup, 3)
@@ -129,7 +130,9 @@ defmodule Postbeam.Config do
   @spec dkim_option?({atom(), term()}) :: boolean()
   defp dkim_option?({key, _}) when key in [:d, :s, :private_key], do: true
   defp dkim_option?({:a, algorithm}), do: algorithm in [:"rsa-sha256", :"ed25519-sha256"]
-  defp dkim_option?({:c, {headers, :simple}}), do: headers in [:simple, :relaxed]
+
+  defp dkim_option?({:c, {headers, body}}),
+    do: headers in [:simple, :relaxed] and body in [:simple, :relaxed]
 
   defp dkim_option?({:h, headers}) do
     is_list(headers) and "from" in headers and Enum.all?(headers, &header_name?/1)

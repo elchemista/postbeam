@@ -1,5 +1,12 @@
 defmodule Postbeam.SMTP.Session.Envelope do
   @moduledoc false
-  defstruct from: :undefined, to: [], data: <<>>, expectedsize: 0, auth: {<<>>, <<>>}, flags: []
+  defstruct from: :undefined,
+            to: [],
+            recipient_count: 0,
+            data: <<>>,
+            expectedsize: 0,
+            auth: {<<>>, <<>>},
+            flags: []
+
   @type t() :: %__MODULE__{}
 end

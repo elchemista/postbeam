@@ -21,6 +21,7 @@ validation. `dkim: nil` disables signing for a call.
 | `tls_options` | `[]` | OTP SSL overrides, such as a private CA |
 | `port` | `25` | Destination SMTP port |
 | `connect_timeout` | `5_000` | TCP connection/send timeout, ms |
+| `tls_timeout` | `connect_timeout` | STARTTLS handshake deadline, ms |
 | `smtp_timeout` | `60_000` | Hard deadline for each IP attempt, ms |
 | `dns_timeout` | `5_000` | Deadline for each DNS query, ms |
 | `dns_options` | `[]` | OTP resolver options, such as private nameservers |
@@ -29,9 +30,16 @@ validation. `dkim: nil` disables signing for a call.
 | `resolver` | `Postbeam.MX` | DNS adapter implementing `lookup/3` |
 | `transport` | `Postbeam.SMTP` | SMTP adapter implementing `deliver/3` |
 
-TLS uses TLS 1.2/1.3, system CAs and MX hostname verification. Use `tls: :always`
-to require encryption. `:if_available` permits plaintext, including when the
-underlying SMTP client cannot establish optional STARTTLS.
+TLS uses TLS 1.2/1.3, system CAs and MX hostname verification. A custom
+`tls_options: [cacertfile: ~c"/path/to/ca.pem"]` or `cacerts: [...]` replaces the
+system trust store. The default verification mode remains `:verify_peer`.
+
+Use `tls: :always` to require verified encryption with these defaults; a failed
+handshake never retries in plaintext. `:if_available` permits plaintext when
+STARTTLS is unavailable and reconnects without encryption if its handshake
+fails, including certificate/hostname verification failures. Such a fallback
+emits a notice log. Explicit `tls_options: [verify: :verify_none]` disables
+certificate verification while retaining encryption when STARTTLS succeeds.
 
 There is no SMTP authentication or submission relay: delivery goes directly to
 the recipient's MX. Multiple recipients, MX hosts and IPs increase total elapsed

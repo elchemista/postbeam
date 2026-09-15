@@ -27,13 +27,25 @@ defmodule Postbeam.SMTP.Session.Transaction do
 
   @doc false
   @spec recipient(binary(), State.t()) :: result()
+  def recipient(_args, %State{envelope: %Envelope{from: :undefined}} = state) do
+    Response.reply(state, "503 Error: need MAIL command\r\n")
+  end
+
   def recipient(args, state) do
-    with {:ok, address} <- command_address(args, "TO:", "RCPT TO:<address>"),
+    with :ok <- recipient_capacity(state),
+         {:ok, address} <- command_address(args, "TO:", "RCPT TO:<address>"),
          {:ok, recipient, extra} <- parse_address(address, state, :recipient) do
       accept_recipient(recipient, extra, state)
     else
       {:error, message} -> Response.reply(state, message)
     end
+  end
+
+  @spec recipient_capacity(State.t()) :: :ok | {:error, binary()}
+  defp recipient_capacity(state) do
+    if state.envelope.recipient_count < Keyword.get(state.options, :max_recipients, 100),
+      do: :ok,
+      else: {:error, "452 Too many recipients\r\n"}
   end
 
   @spec command_address(binary(), binary(), binary()) :: {:ok, binary()} | {:error, iodata()}
@@ -83,7 +95,11 @@ defmodule Postbeam.SMTP.Session.Transaction do
   defp accept_recipient(recipient, "", state) do
     case state.module.handle_RCPT(recipient, state.callbackstate) do
       {:ok, callback_state} ->
-        envelope = %{state.envelope | to: state.envelope.to ++ [recipient]}
+        envelope = %{
+          state.envelope
+          | to: [recipient | state.envelope.to],
+            recipient_count: state.envelope.recipient_count + 1
+        }
 
         Response.reply(state, "250 recipient Ok\r\n", %{
           state
@@ -117,28 +133,29 @@ defmodule Postbeam.SMTP.Session.Transaction do
   @spec mail_option(binary(), State.t(), State.t(), binary()) ::
           {:ok, State.t()} | {:error, iodata()}
   defp mail_option(<<"SIZE=", size::binary>>, updated, _original, _extra) do
-    expected = :erlang.binary_to_integer(size)
-
-    if updated.maxsize == :infinity or expected <= updated.maxsize do
-      {:ok, %{updated | envelope: %{updated.envelope | expectedsize: expected}}}
-    else
-      {:error,
-       [
-         "552 Estimated message length ",
-         size,
-         " exceeds limit of ",
-         Integer.to_string(updated.maxsize),
-         "\r\n"
-       ]}
+    with {:ok, expected} <- declared_size(size) do
+      if updated.maxsize == :infinity or expected <= updated.maxsize do
+        {:ok, %{updated | envelope: %{updated.envelope | expectedsize: expected}}}
+      else
+        {:error,
+         [
+           "552 Estimated message length ",
+           size,
+           " exceeds limit of ",
+           Integer.to_string(updated.maxsize),
+           "\r\n"
+         ]}
+      end
     end
   end
 
   defp mail_option(<<"BODY=", type::binary>>, updated, _original, _extra) do
-    if extension?(updated, ~c"8BITMIME") do
-      flag = Map.fetch!(%{"8BITMIME" => :"8bitmime", "7BIT" => :"7bit"}, type)
+    with true <- extension?(updated, ~c"8BITMIME"),
+         {:ok, flag} <- body_flag(type) do
       add_flag(updated, flag)
     else
-      {:error, "555 Unsupported option BODY\r\n"}
+      false -> {:error, "555 Unsupported option BODY\r\n"}
+      :error -> {:error, "501 Invalid BODY parameter\r\n"}
     end
   end
 
@@ -154,6 +171,20 @@ defmodule Postbeam.SMTP.Session.Transaction do
       :error -> {:error, ["555 Unsupported option: ", extra, "\r\n"]}
     end
   end
+
+  @spec declared_size(binary()) :: {:ok, non_neg_integer()} | {:error, binary()}
+  defp declared_size(size) do
+    if byte_size(size) in 1..20 and Binary.all(&(&1 in ?0..?9), size) do
+      {:ok, String.to_integer(size)}
+    else
+      {:error, "501 Invalid SIZE parameter\r\n"}
+    end
+  end
+
+  @spec body_flag(binary()) :: {:ok, :"8bitmime" | :"7bit"} | :error
+  defp body_flag("8BITMIME"), do: {:ok, :"8bitmime"}
+  defp body_flag("7BIT"), do: {:ok, :"7bit"}
+  defp body_flag(_type), do: :error
 
   @spec add_flag(State.t(), atom()) :: {:ok, State.t()}
   defp add_flag(state, flag) do

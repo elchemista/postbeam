@@ -34,7 +34,6 @@ defmodule Postbeam.SMTP.Session do
   alias Postbeam.SMTP.Session.Transaction
   alias Postbeam.SMTP.TLS
   alias Postbeam.SMTP.Util
-  alias Task.Supervisor
 
   if Mix.env() == :test do
     @compile [:export_all, :nowarn_export_all]
@@ -53,6 +52,9 @@ defmodule Postbeam.SMTP.Session do
             | {:hostname, :inet.hostname()}
             | {:protocol, :smtp | :lmtp}
             | {:tls_options, list(tls_opt())}
+            | {:max_recipients, pos_integer()}
+            | {:session_timeout, pos_integer()}
+            | {:tls_timeout, pos_integer()}
           )
   @type error_class() ::
           :tcp_closed
@@ -128,7 +130,7 @@ defmodule Postbeam.SMTP.Session do
            protocol: protocol,
            options: options,
            callbackstate: callback_state
-         }, @timeout}
+         }, session_timeout(options)}
 
       {:stop, reason, message} ->
         transport.send(socket, [message, ~c"\r\n"])
@@ -161,66 +163,70 @@ defmodule Postbeam.SMTP.Session do
   end
 
   @impl GenServer
-  @spec handle_info(
-          any(),
-          State.t()
-        ) ::
-          {:noreply, State.t()}
-          | {:stop, any(), State.t()}
   @doc false
-  def handle_info({ref, response}, %State{reader: %Task{ref: ref}} = state) do
-    Process.demonitor(ref, [:flush])
-    handle_info(response, %{state | reader: nil})
+  @spec handle_info(term(), State.t()) ::
+          {:noreply, State.t()} | {:noreply, State.t(), timeout()} | {:stop, term(), State.t()}
+  def handle_info(message, state) do
+    handle_message(message, state)
+  catch
+    :throw, {:stop, reason, %State{} = stopped_state} -> {:stop, reason, stopped_state}
   end
 
-  def handle_info(
-        {:DOWN, ref, :process, _pid, reason},
-        %State{reader: %Task{ref: ref}} = state
-      ) do
+  @spec handle_message(term(), State.t()) ::
+          {:noreply, State.t()} | {:noreply, State.t(), timeout()} | {:stop, term(), State.t()}
+  defp handle_message({ref, response}, %State{reader: %Task{ref: ref}} = state) do
+    Process.demonitor(ref, [:flush])
+    handle_message(response, %{state | reader: nil})
+  end
+
+  defp handle_message(
+         {:DOWN, ref, :process, _pid, reason},
+         %State{reader: %Task{ref: ref}} = state
+       ) do
     state = %{state | reader: nil}
     Response.send_reply(state, "451 Error receiving message\r\n")
     state = Response.handle_error(:data_receive_error, reason, state)
     {:stop, {:data_receive_error, reason}, state}
   end
 
-  def handle_info(
-        {:receive_data, {:error, :size_exceeded}},
-        %State{readmessage: true} = state
-      ) do
+  defp handle_message(
+         {:receive_data, {:error, :size_exceeded}},
+         %State{readmessage: true} = state
+       ) do
     Response.send_reply(state, ~c"552 Message too large\r\n")
     state = Response.handle_error(:data_rejected, :size_exceeded, state)
     {:stop, :normal, state}
   end
 
-  def handle_info(
-        {:receive_data, {:error, :bare_newline}},
-        %State{readmessage: true} = state
-      ) do
+  defp handle_message(
+         {:receive_data, {:error, :bare_newline}},
+         %State{readmessage: true} = state
+       ) do
     Response.send_reply(state, ~c"451 Bare newline detected\r\n")
     state = Response.handle_error(:data_rejected, :bare_newline, state)
     {:stop, :normal, state}
   end
 
-  def handle_info(
-        {:receive_data, {:error, other}},
-        %State{readmessage: true} = state
-      ) do
+  defp handle_message(
+         {:receive_data, {:error, other}},
+         %State{readmessage: true} = state
+       ) do
     state1 = Response.handle_error(:data_receive_error, other, state)
     {:stop, {:error_receiving_data, other}, state1}
   end
 
-  def handle_info(
-        {:receive_data, body, rest},
-        %State{
-          socket: socket,
-          transport: transport,
-          readmessage: true,
-          envelope: env,
-          module: module,
-          callbackstate: old_callback_state,
-          maxsize: max_size
-        } = state
-      ) do
+  defp handle_message(
+         {:receive_data, body, rest},
+         %State{
+           socket: socket,
+           transport: transport,
+           readmessage: true,
+           envelope: env,
+           module: module,
+           callbackstate: old_callback_state,
+           maxsize: max_size
+         } = state
+       ) do
     case rest do
       <<>> -> :ok
       _ -> Kernel.send(self(), {transport.name(), socket, rest})
@@ -233,7 +239,7 @@ defmodule Postbeam.SMTP.Session do
     case max_size === :infinity or byte_size(data) <= max_size do
       true ->
         {response_type, value, callback_state} =
-          module.handle_DATA(from, to, data, old_callback_state)
+          module.handle_DATA(from, Enum.reverse(to), data, old_callback_state)
 
         report_recipient(response_type, value, state)
         Response.setopts(state, active: :once)
@@ -244,22 +250,23 @@ defmodule Postbeam.SMTP.Session do
            | readmessage: false,
              envelope: %Envelope{},
              callbackstate: callback_state
-         }, @timeout}
+         }, session_timeout(state.options)}
 
       false ->
         Response.send_reply(state, ~c"552 Message too large\r\n")
         Response.setopts(state, active: :once)
 
-        {:noreply, %{state | readmessage: false, envelope: %Envelope{}}, @timeout}
+        {:noreply, %{state | readmessage: false, envelope: %Envelope{}},
+         session_timeout(state.options)}
     end
   end
 
-  def handle_info(
-        {socket_type, socket, packet},
-        %State{socket: socket, transport: transport, waitingauth: false} =
-          state
-      )
-      when socket_type === :tcp or socket_type === :ssl do
+  defp handle_message(
+         {socket_type, socket, packet},
+         %State{socket: socket, transport: transport, waitingauth: false} =
+           state
+       )
+       when socket_type === :tcp or socket_type === :ssl do
     case handle_request(parse_request(packet), state) do
       {:ok,
        %State{options: options, readmessage: true, maxsize: max_size} =
@@ -267,58 +274,59 @@ defmodule Postbeam.SMTP.Session do
         Response.setopts(new_state, packet: :raw)
 
         reader =
-          Supervisor.async_nolink(
+          Task.Supervisor.async_nolink(
             DataSupervisor,
             fn -> DataReader.read(transport, socket, max_size, options) end
           )
 
-        {:noreply, %{new_state | reader: reader}, @timeout}
+        {:noreply, %{new_state | reader: reader}, session_timeout(state.options)}
 
       {:ok, new_state} ->
         Response.setopts(new_state, active: :once)
-        {:noreply, new_state, @timeout}
+        {:noreply, new_state, session_timeout(state.options)}
 
       {:stop, reason, new_state} ->
         {:stop, reason, new_state}
     end
   end
 
-  def handle_info(
-        {socket_type, socket, packet},
-        %State{socket: socket} = state
-      )
-      when socket_type === :tcp or socket_type === :ssl do
+  defp handle_message(
+         {socket_type, socket, packet},
+         %State{socket: socket} = state
+       )
+       when socket_type === :tcp or socket_type === :ssl do
     request = trim_request(packet)
 
-    {:ok, new_state} = handle_sasl(:base64.decode(request), state)
+    {:ok, new_state} = auth_response(request, state)
     Response.setopts(new_state, active: :once)
-    {:noreply, new_state, @timeout}
+    {:noreply, new_state, session_timeout(state.options)}
   end
 
-  def handle_info({kind, _socket}, state) when kind == :tcp_closed or kind == :ssl_closed do
+  defp handle_message({kind, _socket}, state) when kind == :tcp_closed or kind == :ssl_closed do
     state1 = Response.handle_error(kind, [], state)
     {:stop, :normal, state1}
   end
 
-  def handle_info({kind, _socket, reason}, state) when kind == :ssl_error or kind == :tcp_error do
+  defp handle_message({kind, _socket, reason}, state)
+       when kind == :ssl_error or kind == :tcp_error do
     state1 = Response.handle_error(kind, reason, state)
     {:stop, :normal, state1}
   end
 
-  def handle_info(
-        :timeout,
-        %State{socket: socket, transport: transport} = state
-      ) do
+  defp handle_message(
+         :timeout,
+         %State{socket: socket, transport: transport} = state
+       ) do
     Response.send_reply(state, ~c"421 Error: timeout exceeded\r\n")
     transport.close(socket)
     state1 = Response.handle_error(:timeout, [], state)
     {:stop, :normal, state1}
   end
 
-  def handle_info(
-        info,
-        %State{module: module, callbackstate: old_callback_state} = state
-      ) do
+  defp handle_message(
+         info,
+         %State{module: module, callbackstate: old_callback_state} = state
+       ) do
     case :erlang.function_exported(module, :handle_info, 2) do
       true ->
         case module.handle_info(info, old_callback_state) do
@@ -333,7 +341,7 @@ defmodule Postbeam.SMTP.Session do
         end
 
       false ->
-        {:noreply, state, @timeout}
+        {:noreply, state, session_timeout(state.options)}
     end
   end
 
@@ -699,7 +707,7 @@ defmodule Postbeam.SMTP.Session do
         case :ranch_ssl.handshake(
                socket,
                TLS.server_options([{:packet, :line}, {:mode, :list} | tls_opts2]),
-               5000
+               Keyword.get(options, :tls_timeout, 5000)
              ) do
           {:ok, new_socket} ->
             :ranch_ssl.setopts(new_socket, [{:packet, :line}, :binary])
@@ -722,9 +730,8 @@ defmodule Postbeam.SMTP.Session do
               domain: [:postbeam, :server]
             })
 
-            Response.send_reply(state, ~c"454 TLS negotiation failed\r\n")
             state1 = Response.handle_error(:ssl_handshake_error, reason, state)
-            {:ok, state1}
+            {:stop, :normal, state1}
         end
 
       false ->
@@ -802,11 +809,7 @@ defmodule Postbeam.SMTP.Session do
   defp begin_auth("PLAIN", false, state), do: auth_challenge(:plain, "334\r\n", state)
 
   defp begin_auth("PLAIN", parameters, state) do
-    case Binary.split(:base64.decode(parameters), <<0>>) do
-      [_identity, username, password] -> try_auth(:plain, username, password, state)
-      [username, password] -> try_auth(:plain, username, password, state)
-      _ -> {:ok, state}
-    end
+    auth_response(parameters, %{state | waitingauth: :plain})
   end
 
   defp begin_auth("CRAM-MD5", _parameters, state) do
@@ -814,6 +817,29 @@ defmodule Postbeam.SMTP.Session do
     challenge = Util.get_cram_string(hostname(state.options))
     {:ok, updated} = auth_challenge(:"cram-md5", ["334 ", challenge, "\r\n"], state)
     {:ok, %{updated | authdata: :base64.decode(challenge)}}
+  end
+
+  defp begin_auth(_type, _parameters, state),
+    do: Response.reply(state, "504 Unrecognized authentication type\r\n")
+
+  @spec auth_response(binary(), State.t()) :: {:ok, State.t()}
+  defp auth_response("*", state), do: invalid_auth_response(state)
+
+  defp auth_response(encoded, state) do
+    case Base.decode64(encoded, ignore: :whitespace) do
+      {:ok, decoded} -> handle_sasl(decoded, state)
+      :error -> invalid_auth_response(state)
+    end
+  end
+
+  @spec invalid_auth_response(State.t()) :: {:ok, State.t()}
+  defp invalid_auth_response(state) do
+    Response.reply(state, "501 Invalid AUTH response\r\n", %{
+      state
+      | waitingauth: false,
+        authdata: :undefined,
+        envelope: %{state.envelope | auth: {"", ""}}
+    })
   end
 
   @spec auth_challenge(:login | :plain | :"cram-md5", iodata(), State.t()) :: {:ok, State.t()}
@@ -836,7 +862,7 @@ defmodule Postbeam.SMTP.Session do
         try_auth(:"cram-md5", username, {digest, auth_data}, %{state | authdata: :undefined})
 
       _ ->
-        {:ok, %{state | waitingauth: false, authdata: :undefined}}
+        invalid_auth_response(state)
     end
   end
 
@@ -850,7 +876,7 @@ defmodule Postbeam.SMTP.Session do
     case Binary.split(user_pass, <<0>>) do
       [_identity, username, password] -> try_auth(:plain, username, password, state)
       [username, password] -> try_auth(:plain, username, password, state)
-      _ -> {:ok, %{state | waitingauth: false}}
+      _ -> invalid_auth_response(state)
     end
   end
 
@@ -938,6 +964,9 @@ defmodule Postbeam.SMTP.Session do
     :ok
   end
 
+  @spec session_timeout(options()) :: pos_integer()
+  defp session_timeout(options), do: Keyword.get(options, :session_timeout, @timeout)
+
   @spec hostname(options()) :: :inet.hostname()
   defp hostname(opts) do
     :proplists.get_value(:hostname, opts, Util.guess_FQDN())
@@ -966,6 +995,7 @@ defmodule Postbeam.SMTP.Session do
 
   defp report_recipient(:multiple, _any, %State{protocol: :smtp} = state) do
     msg = ~c"SMTP should report a single delivery status for all the recipients"
+    Response.send_reply(state, "451 Invalid DATA handler response\r\n")
     throw({:stop, {:handle_DATA_error, msg}, state})
   end
 

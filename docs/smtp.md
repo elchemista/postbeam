@@ -81,15 +81,21 @@ dependency. Without it, default decoding uses `:raw`.
 
 ## Supervision and configuration
 
-Starting `:postbeam` starts `Postbeam.SMTP.ClientSupervisor` for asynchronous
-client deliveries and `Postbeam.SMTP.DataSupervisor` for incoming DATA readers.
+Starting `:postbeam` starts `Postbeam.SMTP.ClientSupervisor` for
+`Postbeam.deliver/2`, Swoosh deliveries using the default transport, and
+asynchronous client deliveries. `Postbeam.SMTP.DataSupervisor` owns incoming DATA readers.
 Listeners start only when explicitly added to a supervision tree.
 
-Configure the asynchronous client task limit before application startup:
+Configure the shared outbound task limit before application startup:
 
 ```elixir
 config :postbeam, :max_outbound_connections, 1024
 ```
+
+When capacity is exhausted, the default transport returns a retryable
+`:max_children` error without opening a socket. This is a concurrency cap,
+not a queue. Low-level `Client.send_blocking/2` and `Client.open/1` execute in
+their caller and are outside this task limit.
 
 For custom protocol handlers, implement `Postbeam.SMTP.Handler` and supervise
 `{Postbeam.SMTP.Server, {MyHandler, options}}`. `Postbeam.SMTP.Example`
@@ -132,6 +138,9 @@ Erlang suites are compiled and loaded before ExUnit runs.
 | `legacy_test.exs` | All six original EUnit suites: client, server, sessions, TCP/TLS sockets, MIME/DKIM and address utilities |
 | `otp_test.exs` | Concurrent deliveries, supervision, cleanup, STARTTLS, certificate verification and malformed replies |
 | `session_response_test.exs` | Callback state and failure handling when sending responses or changing socket options |
+| `protocol_errors_test.exs` | Malformed AUTH, DATA callback stops, TLS deadlines and LMTP recipient order |
+| `outbound_supervision_test.exs`, `tls_fallback_test.exs` | Shared outbound capacity and observable optional TLS fallback |
+| `dkim_test.exs` | Relaxed body canonicalization, repeated headers and signed metadata |
 | `data_reader_test.exs` | DATA framing across packet boundaries, empty messages, newline policies and size limits |
 | `mime_test.exs`, `binary_test.exs`, `util_test.exs` | Charset handling, byte operations and RFC parsing |
 | `properties_test.exs` | All 11 PropEr properties for generated MIME messages and RFC address lists |

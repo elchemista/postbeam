@@ -44,6 +44,22 @@ explicit Ed25519 keys support `a: :"ed25519-sha256"`. MIME and DKIM signing are
 handled by `Postbeam.SMTP.MIME` and `Postbeam.SMTP.DKIM`. Signature bytes remain unchanged across MX attempts and
 Swoosh recipients.
 
+## Canonicalization and signed headers
+
+`c: {:relaxed, :simple}` is the default. Set `c: {:relaxed, :relaxed}` to
+normalize spaces and tabs within body lines, remove trailing whitespace, and
+ignore trailing empty lines according to
+[RFC 6376 section 3.4.4](https://www.rfc-editor.org/rfc/rfc6376.html#section-3.4.4).
+This tolerates those whitespace changes, but does not permit arbitrary line
+rewrapping or changes to the message content. Both header and body modes accept
+`:simple` or `:relaxed`.
+
+The default `h` list covers From, To, Cc, Reply-To, Subject, Date, Message-ID,
+MIME-Version, Content-Type and Content-Transfer-Encoding. Override it with
+`h: ["from", ...]` when needed. Missing fields contribute no bytes to the hash,
+but remain in `h` so adding them invalidates the signature. Repeated names
+select successive occurrences from the bottom of the header block.
+
 ## Custom persistence
 
 Set `key_store: {MyApp.Keys, options}` and implement `Postbeam.KeyStore`:

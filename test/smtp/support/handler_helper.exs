@@ -9,6 +9,11 @@ defmodule Postbeam.SMTP.TestHandler do
     extensions =
       if Map.get(state, :tls), do: extensions ++ [{~c"STARTTLS", true}], else: extensions
 
+    extensions =
+      if types = Map.get(state, :auth_types),
+        do: extensions ++ [{~c"AUTH", types}],
+        else: extensions
+
     {:ok, extensions, state}
   end
 
@@ -24,7 +29,9 @@ defmodule Postbeam.SMTP.TestHandler do
            :release -> :ok
          end)
 
-    {:ok, "queued", state}
+    if Map.get(state, :multiple),
+      do: {:multiple, Enum.map(to, fn _ -> {:ok, "queued"} end), state},
+      else: {:ok, "queued", state}
   end
 
   def handle_MAIL_extension(_, _), do: :error
@@ -34,5 +41,13 @@ defmodule Postbeam.SMTP.TestHandler do
   def handle_STARTTLS(state), do: state
   def handle_other(_, _, state), do: {~c"500 Unknown command", state}
   def code_change(_, state, _), do: {:ok, Map.put(state, :upgraded, true)}
-  def terminate(_, _), do: :ok
+
+  def terminate(reason, state) do
+    if Map.get(state, :notify_termination),
+      do: send(state.owner, {:session_terminated, self(), reason})
+
+    :ok
+  end
+
+  def handle_AUTH(_type, _username, _password, _state), do: :error
 end

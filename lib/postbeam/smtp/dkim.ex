@@ -25,10 +25,13 @@ defmodule Postbeam.SMTP.DKIM do
 
   alias Postbeam.SMTP.Binary
   alias Postbeam.SMTP.MIME
+
+  @signed_headers ~w(from to cc reply-to subject date message-id mime-version content-type content-transfer-encoding)
+
   @spec sign(list(binary()), binary(), MIME.dkim_options()) :: list(binary())
   @doc "Prepends a DKIM signature to encoded headers using the supplied signing options."
   def sign(headers, body, opts) do
-    headers_to_sign = :proplists.get_value(:h, opts, ["from", "to", "subject", "date"])
+    headers_to_sign = :proplists.get_value(:h, opts, @signed_headers)
     s_did = :proplists.get_value(:d, opts)
     selector = :proplists.get_value(:s, opts)
 
@@ -75,24 +78,21 @@ defmodule Postbeam.SMTP.DKIM do
   @spec dkim_filter_headers([binary()], [binary()]) :: [binary()]
   defp dkim_filter_headers(headers, headers_to_sign) do
     keyed_headers =
-      for hdr <- headers,
-          into: [],
-          do:
-            (
-              [name, _] = :binary.split(hdr, ":")
-              {Binary.strip(Binary.to_lower(name)), hdr}
-            )
+      Enum.reduce(headers, [], fn header, acc ->
+        [name, _] = :binary.split(header, ":")
+        [{Binary.strip(Binary.to_lower(name)), header} | acc]
+      end)
 
-    with_undef =
-      for name <- headers_to_sign,
-          into: [],
-          do:
-            MIME.get_header_value(
-              Binary.to_lower(name),
-              keyed_headers
-            )
+    # RFC 6376 section 5.4.2: consume each occurrence once, from the bottom up.
+    {selected, _remaining} =
+      Enum.reduce(headers_to_sign, {[], keyed_headers}, fn name, {selected, remaining} ->
+        case List.keytake(remaining, Binary.to_lower(name), 0) do
+          {{_, header}, rest} -> {[header | selected], rest}
+          nil -> {selected, remaining}
+        end
+      end)
 
-    for hdr <- with_undef, hdr !== :undefined, into: [], do: hdr
+    Enum.reverse(selected)
   end
 
   @doc "Canonicalizes encoded headers with the selected DKIM algorithm."
@@ -124,7 +124,7 @@ defmodule Postbeam.SMTP.DKIM do
     []
   end
 
-  @doc "Canonicalizes a body for DKIM; relaxed body canonicalization is unsupported."
+  @doc "Canonicalizes a body using the simple or relaxed DKIM algorithm."
   @spec canonicalize_body(binary(), :simple | :relaxed) :: binary()
   def canonicalize_body(<<>>, :simple) do
     "\r\n"
@@ -134,9 +134,17 @@ defmodule Postbeam.SMTP.DKIM do
     :re.replace(body, ~c"(\r\n)*$", ~c"\r\n", return: :binary)
   end
 
-  def canonicalize_body(_body, :relaxed) do
-    throw({:not_supported, :dkim_body_relaxed})
+  def canonicalize_body(body, :relaxed) do
+    body
+    |> then(&:re.replace(&1, ~c"[\t ]+", ~c" ", [:global, return: :binary]))
+    |> then(&:re.replace(&1, ~c" (?=\r\n|\\z)", <<>>, [:global, return: :binary]))
+    |> then(&:re.replace(&1, ~c"(\r\n)*\\z", <<>>, return: :binary))
+    |> terminate_body()
   end
+
+  @spec terminate_body(binary()) :: binary()
+  defp terminate_body(<<>>), do: <<>>
+  defp terminate_body(body), do: body <> "\r\n"
 
   @spec dkim_hash_body(binary()) :: binary()
   defp dkim_hash_body(canonic_body) do
@@ -236,8 +244,8 @@ defmodule Postbeam.SMTP.DKIM do
     <<"bh=", b64_sign::binary>>
   end
 
-  defp dkim_encode_tag(:c, {hdrs, :simple}) do
-    <<"c=", :erlang.atom_to_binary(hdrs, :utf8)::binary, "/simple">>
+  defp dkim_encode_tag(:c, {headers, body}) do
+    "c=#{headers}/#{body}"
   end
 
   defp dkim_encode_tag(:d, domain) do

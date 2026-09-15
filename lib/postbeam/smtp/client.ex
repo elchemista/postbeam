@@ -48,6 +48,7 @@ defmodule Postbeam.SMTP.Client do
     @compile [:export_all, :nowarn_export_all]
   end
 
+  require Logger
   require Record
   @type email_address() :: charlist() | binary()
   @type email() ::
@@ -62,6 +63,7 @@ defmodule Postbeam.SMTP.Client do
             | {:sockopts, list(:gen_tcp.connect_option())}
             | {:port, :inet.port_number()}
             | {:timeout, timeout()}
+            | {:tls_timeout, timeout()}
             | {:relay, :inet.ip_address() | :inet.hostname() | binary()}
             | {:no_mx_lookups, boolean()}
             | {:auth, :always | :never | :if_available}
@@ -312,6 +314,11 @@ defmodule Postbeam.SMTP.Client do
        ) do
     case :proplists.get_value(:tls, options) do
       :if_available ->
+        Logger.notice(
+          "SMTP STARTTLS failed; retrying without encryption because tls is :if_available",
+          smtp_host: host
+        )
+
         no_tls_options = [{:tls, :never} | :proplists.delete(:tls, options)]
 
         try do
@@ -520,7 +527,7 @@ defmodule Postbeam.SMTP.Client do
             Socket.to_ssl_client(
               socket,
               [:binary | :proplists.get_value(:tls_options, options, [])],
-              5000
+              Keyword.get(options, :tls_timeout, Keyword.get(options, :timeout, 5000))
             )
           catch
             :throw, term -> term
@@ -531,29 +538,14 @@ defmodule Postbeam.SMTP.Client do
         {:ok, extensions} = try_ehlo(new_socket, options)
         {new_socket, extensions}
 
-      {:EXIT, reason} ->
-        Reply.quit(socket)
-        :error_logger.error_msg(~c"Error in ssl upgrade: ~p.~n", [reason])
-        throw({:temporary_failure, :tls_failed})
-
-      {:error, :closed} ->
-        Reply.quit(socket)
-        :error_logger.error_msg(~c"Error in ssl upgrade: socket closed.~n")
-        throw({:temporary_failure, :tls_failed})
-
       {:error, :ssl_not_started} ->
         Reply.quit(socket)
-        :error_logger.error_msg(~c"SSL not started.~n")
         throw({:permanent_failure, :ssl_not_started})
 
-      {:error, reason} ->
+      error ->
         Reply.quit(socket)
-        trace(options, ~c"TLS negotiation failed: ~p~n", [reason])
+        trace(options, ~c"TLS negotiation failed: ~p~n", [error])
         throw({:temporary_failure, :tls_failed})
-
-      var_else ->
-        trace(options, ~c"~p~n", [var_else])
-        false
     end
   end
 
