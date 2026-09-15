@@ -1,6 +1,7 @@
 defmodule Postbeam.SMTP.SessionResponseTest do
   use ExUnit.Case, async: true
 
+  alias Postbeam.SMTP.Session
   alias Postbeam.SMTP.Session.Envelope
   alias Postbeam.SMTP.Session.Response
   alias Postbeam.SMTP.Session.State
@@ -70,5 +71,21 @@ defmodule Postbeam.SMTP.SessionResponseTest do
              catch_throw(Response.send_reply(state({:error, :closed}, :stop), "250 OK\r\n"))
 
     assert updated.callbackstate == :stopped
+  end
+
+  test "an inconsistent SASL state returns 501 and clears the pending exchange" do
+    initial = %{
+      state(:ok)
+      | waitingauth: :plain,
+        authdata: "previous challenge",
+        envelope: %Envelope{auth: {"previous user", "previous credential"}}
+    }
+
+    packet = Base.encode64(<<0, "user", 0, "pass">>) <> "\r\n"
+    assert {:noreply, updated, _timeout} = Session.handle_info({:tcp, :ok, packet}, initial)
+    assert_received {:wire_reply, "501 Invalid AUTH response\r\n"}
+    assert updated.waitingauth == false
+    assert updated.authdata == :undefined
+    assert updated.envelope.auth == {"", ""}
   end
 end

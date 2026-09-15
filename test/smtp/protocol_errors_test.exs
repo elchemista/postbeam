@@ -96,6 +96,89 @@ defmodule Postbeam.SMTP.ProtocolErrorsTest do
     assert {:error, :closed} = Socket.recv(socket, 0, 1000)
   end
 
+  test "successful AUTH rejects further authentication without closing the connection" do
+    initial_response = Base.encode64(<<0, "user", 0, "pass">>)
+
+    for method <- [:login, :plain_challenge, :plain_initial] do
+      {name, socket} =
+        listener(auth_types: ~c"PLAIN LOGIN CRAM-MD5", auth_credentials: {"user", "pass"})
+
+      [session] = Server.sessions(name)
+
+      case method do
+        :login ->
+          assert command(socket, "AUTH LOGIN") =~ "334 "
+          assert command(socket, Base.encode64("user")) =~ "334 "
+          assert command(socket, Base.encode64("pass")) =~ "235 "
+
+        :plain_challenge ->
+          assert command(socket, "AUTH PLAIN") =~ "334"
+          assert command(socket, initial_response) =~ "235 "
+
+        :plain_initial ->
+          assert command(socket, "AUTH PLAIN " <> initial_response) =~ "235 "
+      end
+
+      assert_receive {:authenticated, ^session, _, "user"}
+
+      for next_auth <- ["PLAIN " <> initial_response, "PLAIN", "LOGIN", "CRAM-MD5"] do
+        assert command(socket, "AUTH " <> next_auth) =~ "503 "
+        assert command(socket, "NOOP") =~ "250 "
+      end
+
+      assert command(socket, "MAIL FROM:<sender@example.org>") =~ "250 "
+      assert command(socket, "RCPT TO:<one@example.net>") =~ "250 "
+      assert command(socket, "DATA") =~ "354 "
+      assert command(socket, "Hello\r\n.") =~ "250 "
+      assert_receive {:delivery_started, ^session, _, _, "Hello"}
+
+      for reset <- ["RSET", "EHLO sender.test", "HELO sender.test"] do
+        assert command(socket, reset) =~ "250 "
+        assert command(socket, "AUTH PLAIN " <> initial_response) =~ "503 "
+      end
+
+      refute_receive {:authenticated, ^session, _, _}
+      assert command(socket, "QUIT") =~ "221 "
+    end
+  end
+
+  test "failed and cancelled AUTH allow a later successful attempt" do
+    {_, socket} = listener(auth_types: ~c"PLAIN LOGIN", auth_credentials: {"user", "pass"})
+
+    assert command(socket, "AUTH PLAIN " <> Base.encode64(<<0, "user", 0, "wrong">>)) =~ "535 "
+    assert command(socket, "AUTH LOGIN") =~ "334 "
+    assert command(socket, Base.encode64("user")) =~ "334 "
+    assert command(socket, "*") =~ "501 "
+    assert command(socket, "AUTH PLAIN invalid!") =~ "501 "
+    assert command(socket, "AUTH PLAIN " <> Base.encode64(<<0, "user", 0, "pass">>)) =~ "235 "
+    assert command(socket, "NOOP") =~ "250 "
+  end
+
+  test "AUTH during MAIL is rejected until the transaction is reset" do
+    {_, socket} = listener(auth_types: ~c"PLAIN", auth_credentials: {"user", "pass"})
+    auth = "AUTH PLAIN " <> Base.encode64(<<0, "user", 0, "pass">>)
+
+    assert command(socket, "MAIL FROM:<sender@example.org>") =~ "250 "
+    assert command(socket, auth) =~ "503 "
+    assert command(socket, "RSET") =~ "250 "
+    assert command(socket, auth) =~ "235 "
+  end
+
+  test "STARTTLS resets authentication and allows AUTH in the encrypted session" do
+    {_, socket} =
+      listener(tls: true, auth_types: ~c"PLAIN", auth_credentials: {"user", "pass"})
+
+    auth = "AUTH PLAIN " <> Base.encode64(<<0, "user", 0, "pass">>)
+    assert command(socket, auth) =~ "235 "
+    assert command(socket, "STARTTLS") =~ "220 "
+    assert {:ok, secure} = Socket.to_ssl_client(socket, [:binary, verify: :verify_none], 1000)
+    on_exit(fn -> Socket.close(secure) end)
+    assert command(secure, "EHLO sender.test") =~ "250 "
+    assert command(secure, auth) =~ "235 "
+    assert command(secure, auth) =~ "503 "
+    assert command(secure, "NOOP") =~ "250 "
+  end
+
   test "LMTP retains recipient order when emitting individual delivery results" do
     name = make_ref()
 

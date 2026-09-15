@@ -9,6 +9,7 @@ defmodule Postbeam.SMTP.Session.State do
             extensions: [],
             maxsize: 10_485_760,
             waitingauth: false,
+            authenticated: false,
             authdata: :undefined,
             readmessage: false,
             tls: false,

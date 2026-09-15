@@ -49,5 +49,11 @@ defmodule Postbeam.SMTP.TestHandler do
     :ok
   end
 
+  def handle_AUTH(type, username, password, %{auth_credentials: {username, password}} = state)
+      when type in [:plain, :login] do
+    send(state.owner, {:authenticated, self(), type, username})
+    {:ok, state}
+  end
+
   def handle_AUTH(_type, _username, _password, _state), do: :error
 end

@@ -528,6 +528,13 @@ defmodule Postbeam.SMTP.Session do
     end
   end
 
+  defp handle_request({"AUTH", _args}, %State{authenticated: true} = state),
+    do: Response.reply(state, "503 Already authenticated\r\n")
+
+  defp handle_request({"AUTH", _args}, %State{envelope: %Envelope{from: from}} = state)
+       when from != :undefined,
+       do: Response.reply(state, "503 AUTH not permitted during a mail transaction\r\n")
+
   defp handle_request(
          {"AUTH" = c, _args},
          %State{envelope: :undefined, protocol: protocol} = state
@@ -720,6 +727,7 @@ defmodule Postbeam.SMTP.Session do
                  envelope: :undefined,
                  authdata: :undefined,
                  waitingauth: false,
+                 authenticated: false,
                  readmessage: false,
                  tls: true,
                  callbackstate: module.handle_STARTTLS(old_callback_state)
@@ -809,7 +817,7 @@ defmodule Postbeam.SMTP.Session do
   defp begin_auth("PLAIN", false, state), do: auth_challenge(:plain, "334\r\n", state)
 
   defp begin_auth("PLAIN", parameters, state) do
-    auth_response(parameters, %{state | waitingauth: :plain})
+    auth_response(parameters, auth_state(:plain, state))
   end
 
   defp begin_auth("CRAM-MD5", _parameters, state) do
@@ -845,7 +853,17 @@ defmodule Postbeam.SMTP.Session do
   @spec auth_challenge(:login | :plain | :"cram-md5", iodata(), State.t()) :: {:ok, State.t()}
   defp auth_challenge(method, reply, state) do
     Response.send_reply(state, reply)
-    {:ok, %{state | waitingauth: method, envelope: %{state.envelope | auth: {"", ""}}}}
+    {:ok, auth_state(method, state)}
+  end
+
+  @spec auth_state(:login | :plain | :"cram-md5", State.t()) :: State.t()
+  defp auth_state(method, state) do
+    %{
+      state
+      | waitingauth: method,
+        authdata: :undefined,
+        envelope: %{state.envelope | auth: {"", ""}}
+    }
   end
 
   @spec handle_sasl(binary(), State.t()) :: {:ok, State.t()}
@@ -903,6 +921,8 @@ defmodule Postbeam.SMTP.Session do
     try_auth(:login, username, password, state)
   end
 
+  defp handle_sasl(_data, state), do: invalid_auth_response(state)
+
   @spec has_extension(list({charlist(), charlist()}), charlist()) :: {true, charlist()} | false
   defp has_extension(extensions, ext) do
     case :proplists.get_value(ext, extensions) do
@@ -939,6 +959,7 @@ defmodule Postbeam.SMTP.Session do
              %{
                new_state
                | callbackstate: callback_state,
+                 authenticated: true,
                  envelope: %{envelope | auth: {username, credential}}
              }}
 

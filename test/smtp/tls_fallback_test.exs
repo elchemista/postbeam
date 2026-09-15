@@ -4,6 +4,62 @@ defmodule Postbeam.SMTP.TLSFallbackTest do
   alias Postbeam.TestReceiver
   import TestReceiver, only: [command: 3, greet: 1, envelope: 1, data: 1]
 
+  test "plaintext delivery does not require an OS trust store" do
+    previous_path = Application.fetch_env(:public_key, :cacerts_path)
+
+    on_exit(fn ->
+      case previous_path do
+        {:ok, path} -> Application.put_env(:public_key, :cacerts_path, path)
+        :error -> Application.delete_env(:public_key, :cacerts_path)
+      end
+
+      :public_key.cacerts_clear()
+    end)
+
+    missing_path =
+      Path.join(System.tmp_dir!(), "postbeam-missing-ca-#{System.unique_integer([:positive])}")
+
+    refute File.exists?(missing_path)
+    Application.put_env(:public_key, :cacerts_path, missing_path)
+    :public_key.cacerts_clear()
+    assert {:failed_load_cacerts, _} = catch_error(:public_key.cacerts_get())
+    Postbeam.TestDNS.put("example.net", :a, {:ok, [{127, 0, 0, 1}]})
+
+    for tls <- [:never, :if_available] do
+      {port, token} =
+        TestReceiver.start(fn socket, _, _ ->
+          if tls == :never do
+            :gen_tcp.send(socket, "220 local.test ESMTP\r\n")
+            command(socket, "EHLO", "250-local.test\r\n250 STARTTLS")
+          else
+            greet(socket)
+          end
+
+          envelope(socket)
+          data(socket)
+          :gen_tcp.send(socket, "250 plaintext-accepted\r\n")
+        end)
+
+      assert {:ok, %{receipt: "plaintext-accepted\r\n"}} =
+               Postbeam.deliver(
+                 [
+                   from: "sender@example.com",
+                   to: "user@example.net",
+                   subject: "Plaintext",
+                   text: "body"
+                 ],
+                 resolver: Postbeam.TestDNS,
+                 hostname: "mta.example.com",
+                 port: port,
+                 tls: tls
+               )
+
+      TestReceiver.done(token)
+    end
+
+    assert {:failed_load_cacerts, _} = catch_error(:public_key.cacerts_get())
+  end
+
   test "opportunistic TLS logs a certificate failure before reconnecting in plaintext" do
     previous_level = :logger.get_module_level(Postbeam.SMTP.Client)
     :ok = :logger.set_module_level(Postbeam.SMTP.Client, :notice)
@@ -57,5 +113,6 @@ defmodule Postbeam.SMTP.TLSFallbackTest do
       end)
 
     assert log =~ "retrying without encryption because tls is :if_available"
+    assert log =~ "SMTP STARTTLS failed for {127, 0, 0, 1}"
   end
 end

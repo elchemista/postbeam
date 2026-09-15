@@ -102,6 +102,13 @@ For custom protocol handlers, implement `Postbeam.SMTP.Handler` and supervise
 demonstrates the callback contract; use `Postbeam.Inbound` for the supported
 application-owned recipient and message handling interface.
 
+For handlers that advertise AUTH, authentication belongs to the connection:
+after success, further AUTH commands receive `503`, including after RSET,
+HELO/EHLO or DATA. AUTH during a mail transaction also receives `503`.
+Failed or cancelled authentication can be retried, and a successful STARTTLS
+upgrade resets authentication. These rules follow
+[RFC 4954 section 4](https://www.rfc-editor.org/rfc/rfc4954.html#section-4).
+
 ## Build and provenance
 
 Ranch remains the listener dependency. OTP provides TCP, TLS and cryptography;

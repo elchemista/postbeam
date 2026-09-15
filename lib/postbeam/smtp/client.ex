@@ -315,8 +315,8 @@ defmodule Postbeam.SMTP.Client do
     case :proplists.get_value(:tls, options) do
       :if_available ->
         Logger.notice(
-          "SMTP STARTTLS failed; retrying without encryption because tls is :if_available",
-          smtp_host: host
+          "SMTP STARTTLS failed for #{inspect(host)}; " <>
+            "retrying without encryption because tls is :if_available"
         )
 
         no_tls_options = [{:tls, :never} | :proplists.delete(:tls, options)]
@@ -477,20 +477,9 @@ defmodule Postbeam.SMTP.Client do
       {atom, true} when atom === :always or atom === :if_available ->
         trace(options, ~c"Starting TLS~n", [])
 
-        case {do_starttls(socket, options), atom} do
-          {false, :always} ->
-            trace(options, ~c"TLS failed~n", [])
-            Reply.quit(socket)
-            throw({:temporary_failure, :tls_failed})
-
-          {false, :if_available} ->
-            trace(options, ~c"TLS failed~n", [])
-            {socket, extensions}
-
-          {{s, e}, _} ->
-            trace(options, ~c"TLS started~n", [])
-            {s, e}
-        end
+        result = do_starttls(socket, options)
+        trace(options, ~c"TLS started~n", [])
+        result
 
       {:always, _} ->
         Reply.quit(socket)
@@ -503,7 +492,7 @@ defmodule Postbeam.SMTP.Client do
   end
 
   @spec do_starttls(Socket.socket(), options()) ::
-          {Socket.socket(), extensions()} | false
+          {Socket.socket(), extensions()}
   defp do_starttls(socket, options) do
     Socket.send(socket, ~c"STARTTLS\r\n")
 
@@ -521,7 +510,7 @@ defmodule Postbeam.SMTP.Client do
     end
   end
 
-  @spec upgrade_tls(Socket.socket(), options()) :: {Socket.socket(), extensions()} | false
+  @spec upgrade_tls(Socket.socket(), options()) :: {Socket.socket(), extensions()}
   defp upgrade_tls(socket, options) do
     case (try do
             Socket.to_ssl_client(

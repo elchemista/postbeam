@@ -33,6 +33,8 @@ validation. `dkim: nil` disables signing for a call.
 TLS uses TLS 1.2/1.3, system CAs and MX hostname verification. A custom
 `tls_options: [cacertfile: ~c"/path/to/ca.pem"]` or `cacerts: [...]` replaces the
 system trust store. The default verification mode remains `:verify_peer`.
+System CAs are loaded only when a TLS handshake is attempted. Plaintext
+delivery does not require a system CA bundle, including with `tls: :never`.
 
 Use `tls: :always` to require verified encryption with these defaults; a failed
 handshake never retries in plaintext. `:if_available` permits plaintext when

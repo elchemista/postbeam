@@ -13,7 +13,6 @@ defmodule Postbeam.SMTP do
 
   alias Postbeam.SMTP.Client
   alias Postbeam.SMTP.Delivery
-  alias Postbeam.SMTP.TLS
 
   alias Postbeam.Config
   alias Postbeam.Message
@@ -203,6 +202,5 @@ defmodule Postbeam.SMTP do
       ],
       Keyword.fetch!(config, :tls_options)
     )
-    |> TLS.client_options()
   end
 end
