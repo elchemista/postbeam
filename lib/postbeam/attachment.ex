@@ -3,6 +3,7 @@ defmodule Postbeam.Attachment do
 
   alias Postbeam.Config
   alias Postbeam.Headers
+  alias Postbeam.Validation
 
   @enforce_keys [:filename, :content_type, :type]
   defstruct [:filename, :content_type, :type, :cid, :path, :data, headers: []]
@@ -26,11 +27,11 @@ defmodule Postbeam.Attachment do
     cid = if type == :inline, do: fields[:cid] || filename, else: fields[:cid]
     content_type = fields[:content_type] || "application/octet-stream"
 
-    with :ok <- validate(nonempty_header?(filename)),
-         :ok <- validate(content_type?(content_type)),
-         :ok <- validate(type in [:attachment, :inline]),
-         :ok <- validate(cid?(cid, type)),
-         :ok <- validate(source?(fields[:data], fields[:path])),
+    with :ok <- Validation.check(nonempty_header?(filename), :attachments),
+         :ok <- Validation.check(content_type?(content_type), :attachments),
+         :ok <- Validation.check(type in [:attachment, :inline], :attachments),
+         :ok <- Validation.check(cid?(cid, type), :attachments),
+         :ok <- Validation.check(source?(fields[:data], fields[:path]), :attachments),
          {:ok, headers} <- Headers.new(fields[:headers], :attachments) do
       {:ok,
        %__MODULE__{
@@ -50,21 +51,16 @@ defmodule Postbeam.Attachment do
   def load(attachments) do
     attachments
     |> Enum.with_index()
-    |> Enum.reduce_while({:ok, []}, fn {attachment, index}, {:ok, loaded} ->
-      case read(attachment) do
-        {:ok, data} ->
-          {:cont, {:ok, [%{attachment | data: data, path: nil} | loaded]}}
-
-        {:error, reason} ->
-          {:halt, {:error, {:attachment, index, reason}}}
-      end
-    end)
-    |> reverse_loaded()
+    |> Validation.map(&load_attachment/1)
   end
 
-  @spec reverse_loaded({:ok, [t()]} | {:error, error()}) :: {:ok, [t()]} | {:error, error()}
-  defp reverse_loaded({:ok, loaded}), do: {:ok, Enum.reverse(loaded)}
-  defp reverse_loaded({:error, _} = error), do: error
+  @spec load_attachment({t(), non_neg_integer()}) :: {:ok, t()} | {:error, error()}
+  defp load_attachment({attachment, index}) do
+    case read(attachment) do
+      {:ok, data} -> {:ok, %{attachment | data: data, path: nil}}
+      {:error, reason} -> {:error, {:attachment, index, reason}}
+    end
+  end
 
   @spec read(t()) :: {:ok, binary()} | {:error, atom()}
   defp read(%__MODULE__{data: data}) when is_binary(data), do: {:ok, data}
@@ -98,8 +94,4 @@ defmodule Postbeam.Attachment do
   defp source?(data, _) when is_binary(data), do: true
   defp source?(nil, path), do: nonempty_header?(path)
   defp source?(_, _), do: false
-
-  @spec validate(boolean()) :: :ok | {:error, {:invalid, :attachments}}
-  defp validate(true), do: :ok
-  defp validate(false), do: {:error, {:invalid, :attachments}}
 end

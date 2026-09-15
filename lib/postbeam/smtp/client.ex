@@ -1,7 +1,3 @@
-# Preserve the imported SMTP callback API and protocol branch structure.
-# credo:disable-for-this-file Credo.Check.Readability.PredicateFunctionNames
-# credo:disable-for-this-file Credo.Check.Refactor.CyclomaticComplexity
-# credo:disable-for-this-file Credo.Check.Refactor.Nesting
 # Copyright 2009 Andrew Thompson <andrew@hijacked.us>. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -37,6 +33,17 @@ defmodule Postbeam.SMTP.Client do
   is required. Both STARTTLS and implicit TLS verify certificates by default;
   `:tls_options` can supply a private CA and server name.
   """
+
+  alias Postbeam.SMTP.Binary
+  alias Postbeam.SMTP.Client.Authentication
+  alias Postbeam.SMTP.Client.Reply
+  alias Postbeam.SMTP.Client.Transaction
+  alias Postbeam.SMTP.ClientSupervisor
+  alias Postbeam.SMTP.Delivery
+  alias Postbeam.SMTP.Socket
+  alias Postbeam.SMTP.Util
+  alias Task.Supervisor
+
   if Mix.env() == :test do
     @compile [:export_all, :nowarn_export_all]
   end
@@ -76,8 +83,8 @@ defmodule Postbeam.SMTP.Client do
 
   @opaque smtp_client_socket() ::
             record(:smtp_client_socket,
-              socket: :undefined | Postbeam.SMTP.Socket.socket(),
-              host: :undefined | charlist(),
+              socket: :undefined | Socket.socket(),
+              host: :undefined | smtp_host(),
               extensions: :undefined | list(),
               options: :undefined | list()
             )
@@ -91,7 +98,7 @@ defmodule Postbeam.SMTP.Client do
           | {:missing_requirement, :auth | :tls}
           | {:unexpected_response, binary() | list(binary())}
           | {:network_failure, {:error, :timeout | :inet.posix()}}
-  @typep smtp_host() :: :inet.hostname()
+  @typep smtp_host() :: :inet.hostname() | :inet.ip_address()
   @type host_failure() ::
           {:temporary_failure, smtp_host(), temporary_failure_reason()}
           | {:permanent_failure, smtp_host(), permanent_failure_reason()}
@@ -111,12 +118,13 @@ defmodule Postbeam.SMTP.Client do
 
   @spec send(email(), options(), callback() | :undefined) ::
           {:ok, pid()} | {:error, term()}
+  @doc "Starts a supervised delivery and reports its receipt or failure through the callback."
   def send(email, options, callback) do
     new_options = normalize_options(options)
 
     case check_options(new_options) do
       :ok ->
-        Postbeam.SMTP.Delivery.start(
+        Delivery.start(
           fn ->
             try do
               send_it(email, new_options)
@@ -138,6 +146,7 @@ defmodule Postbeam.SMTP.Client do
   end
 
   @doc "Starts a supervised delivery without linking failures to the caller."
+  @spec send_async(email(), options(), callback() | :undefined) :: {:ok, pid()} | {:error, term()}
   def send_async(email, options, callback \\ :undefined) do
     __MODULE__.send(email, Keyword.put(options, :link, false), callback)
   end
@@ -149,6 +158,7 @@ defmodule Postbeam.SMTP.Client do
   crash the caller. `options` are SMTP options; `stream_options` control concurrency,
   ordering and timeout. Each task opens its own connection and is never restarted.
   """
+  @spec send_many(Enumerable.t(), options(), keyword()) :: Enumerable.t()
   def send_many(emails, options, stream_options \\ []) do
     stream_options =
       Keyword.merge(
@@ -161,14 +171,15 @@ defmodule Postbeam.SMTP.Client do
         stream_options
       )
 
-    Task.Supervisor.async_stream_nolink(
-      Postbeam.SMTP.ClientSupervisor,
+    Supervisor.async_stream_nolink(
+      ClientSupervisor,
       emails,
       fn email -> send_blocking(email, options) end,
       stream_options
     )
   end
 
+  @spec normalize_options(options()) :: options()
   defp normalize_options(options) do
     defaults = [
       ssl: false,
@@ -182,7 +193,7 @@ defmodule Postbeam.SMTP.Client do
 
     defaults
     |> Keyword.merge(options)
-    |> Keyword.put_new_lazy(:hostname, &Postbeam.SMTP.Util.guess_fqdn/0)
+    |> Keyword.put_new_lazy(:hostname, &Util.guess_fqdn/0)
   end
 
   @doc "Delivers in the calling process and returns the server receipt or an error tuple."
@@ -235,7 +246,7 @@ defmodule Postbeam.SMTP.Client do
   @doc "Sends QUIT and closes a reusable connection."
   @spec close(smtp_client_socket()) :: :ok
   def close(smtp_client_socket(socket: socket)) do
-    quit(socket)
+    Reply.quit(socket)
   end
 
   @spec send_it(email(), options()) :: binary() | smtp_session_error()
@@ -253,11 +264,12 @@ defmodule Postbeam.SMTP.Client do
         catch
           :throw, {failure_type, message} -> {:error, :send, {failure_type, host, message}}
         after
-          quit(socket)
+          Reply.quit(socket)
         end
     end
   end
 
+  @spec smtp_hosts(options()) :: [{non_neg_integer(), smtp_host()}]
   defp smtp_hosts(options) do
     relay = Keyword.fetch!(options, :relay)
     relay = if is_binary(relay), do: String.to_charlist(relay), else: relay
@@ -266,21 +278,19 @@ defmodule Postbeam.SMTP.Client do
       if is_tuple(relay) or Keyword.get(options, :no_mx_lookups, false) do
         []
       else
-        Postbeam.SMTP.Util.mxlookup(relay)
+        Util.mxlookup(relay)
       end
 
     trace(options, ~c"MX records for ~p are ~p~n", [relay, records])
     if records == [], do: [{0, relay}], else: records
   end
 
-  @spec try_smtp_sessions(nonempty_list({non_neg_integer(), charlist()}), options(), list()) ::
+  @spec try_smtp_sessions(nonempty_list({non_neg_integer(), smtp_host()}), options(), list()) ::
           {:ok, smtp_client_socket()} | smtp_session_error()
   defp try_smtp_sessions([{_distance, host} | _tail] = hosts, options, retry_list) do
-    try do
-      {:ok, open_smtp_session(host, options)}
-    catch
-      :throw, fail_msg -> handle_smtp_throw(fail_msg, hosts, options, retry_list)
-    end
+    {:ok, open_smtp_session(host, options)}
+  catch
+    :throw, fail_msg -> handle_smtp_throw(fail_msg, hosts, options, retry_list)
   end
 
   @spec handle_smtp_throw(failure(), list({non_neg_integer(), smtp_host()}), options(), list()) ::
@@ -321,6 +331,9 @@ defmodule Postbeam.SMTP.Client do
     try_next_host(fail_msg, hosts, options, retry_list)
   end
 
+  @spec try_next_host(failure(), [{non_neg_integer(), smtp_host()}], options(), [
+          {smtp_host(), pos_integer()}
+        ]) :: {:ok, smtp_client_socket()} | smtp_session_error()
   defp try_next_host(
          {failure_type, message},
          [{_distance, host} | _tail] = hosts,
@@ -336,6 +349,13 @@ defmodule Postbeam.SMTP.Client do
     end
   end
 
+  @spec fetch_next_host(
+          non_neg_integer(),
+          non_neg_integer() | :undefined,
+          [{non_neg_integer(), smtp_host()}],
+          [{smtp_host(), pos_integer()}],
+          options()
+        ) :: {[{non_neg_integer(), smtp_host()}], [{smtp_host(), pos_integer()}]}
   defp fetch_next_host(retries, retry_count, [{_distance, host} | tail], retry_list, options)
        when is_integer(retry_count) and retry_count >= retries do
     trace(options, ~c"retries for ~s exceeded (~p of ~p)~n", [host, retry_count, retries])
@@ -359,7 +379,7 @@ defmodule Postbeam.SMTP.Client do
     {tail ++ [{distance, host}], :lists.keydelete(host, 1, retry_list) ++ [{host, 1}]}
   end
 
-  @spec open_smtp_session(charlist(), options()) :: smtp_client_socket()
+  @spec open_smtp_session(smtp_host(), options()) :: smtp_client_socket()
   defp open_smtp_session(host, options) do
     {:ok, socket, _host2, banner} = connect(host, options)
     trace(options, ~c"connected to ~p; banner was ~s~n", [host, banner])
@@ -367,454 +387,32 @@ defmodule Postbeam.SMTP.Client do
     trace(options, ~c"Extensions are ~p~n", [extensions])
 
     {socket2, extensions2} =
-      if Postbeam.SMTP.Socket.get_proto(socket) == :ssl do
+      if Socket.get_proto(socket) == :ssl do
         {socket, extensions}
       else
         try_starttls(socket, options, extensions)
       end
 
     trace(options, ~c"Extensions are ~p~n", [extensions2])
-    authed = try_auth(socket2, options, :proplists.get_value("AUTH", extensions2))
+
+    authed =
+      Authentication.authenticate(
+        socket2,
+        options,
+        :proplists.get_value("AUTH", extensions2)
+      )
+
     trace(options, ~c"Authentication status is ~p~n", [authed])
     smtp_client_socket(socket: socket2, host: host, extensions: extensions2, options: options)
   end
 
-  @spec try_sending_it(email(), Postbeam.SMTP.Socket.socket(), extensions(), options()) ::
-          binary() | nonempty_list({binary(), binary()})
-  defp try_sending_it({from, to, body}, socket, extensions, options) do
-    try_mail_from(from, socket, extensions, options)
-    try_rcpt_to(to, socket, extensions, options)
-
-    case :proplists.get_value(:protocol, options) do
-      :smtp -> try_data(body, socket, extensions, options)
-      :lmtp -> try_lmtp_data(body, to, socket, extensions, options)
-    end
+  @spec try_sending_it(email(), Socket.socket(), extensions(), options()) ::
+          binary() | nonempty_list({email_address(), binary()})
+  defp try_sending_it(email, socket, _extensions, options) do
+    Transaction.deliver(email, socket, options)
   end
 
-  @spec try_mail_from(email_address(), Postbeam.SMTP.Socket.socket(), extensions(), options()) ::
-          true
-  defp try_mail_from(from, socket, extensions, options) when is_binary(from) do
-    try_mail_from(:erlang.binary_to_list(from), socket, extensions, options)
-  end
-
-  defp try_mail_from(~c"<" ++ _ = from, socket, _extensions, options) do
-    on_tx_error = :proplists.get_value(:on_transaction_error, options)
-    Postbeam.SMTP.Socket.send(socket, [~c"MAIL FROM:", from, ~c"\r\n"])
-
-    case read_possible_multiline_reply(socket) do
-      {:ok, <<"250", _rest::binary>>} ->
-        true
-
-      {:ok, <<"4", _rest::binary>> = msg} when on_tx_error === :reset ->
-        rset_or_quit(socket)
-        throw({:temporary_failure, msg})
-
-      {:ok, <<"4", _rest::binary>> = msg} ->
-        quit(socket)
-        throw({:temporary_failure, msg})
-
-      {:ok, <<"5", _rest::binary>> = msg} when on_tx_error === :reset ->
-        trace(options, ~c"Mail FROM rejected: ~p~n", [msg])
-        :ok = rset_or_quit(socket)
-        throw({:permanent_failure, msg})
-
-      {:ok, msg} ->
-        trace(options, ~c"Mail FROM rejected: ~p~n", [msg])
-        quit(socket)
-        throw({:permanent_failure, msg})
-    end
-  end
-
-  defp try_mail_from(from, socket, extension, options) do
-    try_mail_from(~c"<" ++ from ++ ~c">", socket, extension, options)
-  end
-
-  @spec try_rcpt_to(list(email_address()), Postbeam.SMTP.Socket.socket(), extensions(), options()) ::
-          true
-  defp try_rcpt_to([], _socket, _extensions, _options) do
-    true
-  end
-
-  defp try_rcpt_to([to | tail], socket, extensions, options) when is_binary(to) do
-    try_rcpt_to([:erlang.binary_to_list(to) | tail], socket, extensions, options)
-  end
-
-  defp try_rcpt_to([~c"<" ++ _ = to | tail], socket, extensions, options) do
-    on_tx_error = :proplists.get_value(:on_transaction_error, options)
-    Postbeam.SMTP.Socket.send(socket, [~c"RCPT TO:", to, ~c"\r\n"])
-
-    case read_possible_multiline_reply(socket) do
-      {:ok, <<"250", _rest::binary>>} ->
-        try_rcpt_to(tail, socket, extensions, options)
-
-      {:ok, <<"251", _rest::binary>>} ->
-        try_rcpt_to(tail, socket, extensions, options)
-
-      {:ok, <<"4", _rest::binary>> = msg} when on_tx_error === :reset ->
-        rset_or_quit(socket)
-        throw({:temporary_failure, msg})
-
-      {:ok, <<"4", _rest::binary>> = msg} ->
-        quit(socket)
-        throw({:temporary_failure, msg})
-
-      {:ok, <<"5", _rest::binary>> = msg} when on_tx_error === :reset ->
-        rset_or_quit(socket)
-        throw({:permanent_failure, msg})
-
-      {:ok, msg} ->
-        quit(socket)
-        throw({:permanent_failure, msg})
-    end
-  end
-
-  defp try_rcpt_to([to | tail], socket, extensions, options) do
-    try_rcpt_to([~c"<" ++ to ++ ~c">" | tail], socket, extensions, options)
-  end
-
-  @spec try_data(binary() | function(), Postbeam.SMTP.Socket.socket(), extensions(), options()) ::
-          binary()
-  defp try_data(body, socket, extensions, options) when is_function(body) do
-    try_data(body.(), socket, extensions, options)
-  end
-
-  defp try_data(body, socket, _extensions, options) do
-    on_tx_error = :proplists.get_value(:on_transaction_error, options)
-    Postbeam.SMTP.Socket.send(socket, ~c"DATA\r\n")
-
-    case read_possible_multiline_reply(socket) do
-      {:ok, <<"354", _rest::binary>>} ->
-        escaped_body = :re.replace(body, "^\\.", "..", [:global, :multiline, return: :binary])
-        Postbeam.SMTP.Socket.send(socket, [escaped_body, ~c"\r\n.\r\n"])
-
-        case read_possible_multiline_reply(socket) do
-          {:ok, <<"250 ", receipt::binary>>} ->
-            receipt
-
-          {:ok, <<"4", _rest2::binary>> = msg} when on_tx_error === :reset ->
-            throw({:temporary_failure, msg})
-
-          {:ok, <<"4", _rest2::binary>> = msg} ->
-            quit(socket)
-            throw({:temporary_failure, msg})
-
-          {:ok, <<"5", _rest2::binary>> = msg} when on_tx_error === :reset ->
-            throw({:permanent_failure, msg})
-
-          {:ok, msg} ->
-            quit(socket)
-            throw({:permanent_failure, msg})
-        end
-
-      {:ok, <<"4", _rest::binary>> = msg} when on_tx_error === :reset ->
-        rset_or_quit(socket)
-        throw({:temporary_failure, msg})
-
-      {:ok, <<"4", _rest::binary>> = msg} ->
-        quit(socket)
-        throw({:temporary_failure, msg})
-
-      {:ok, <<"5", _rest::binary>> = msg} when on_tx_error === :reset ->
-        rset_or_quit(socket)
-        throw({:permanent_failure, msg})
-
-      {:ok, msg} ->
-        quit(socket)
-        throw({:permanent_failure, msg})
-    end
-  end
-
-  @spec try_lmtp_data(
-          binary() | function(),
-          nonempty_list(binary()),
-          Postbeam.SMTP.Socket.socket(),
-          extensions(),
-          options()
-        ) :: binary() | nonempty_list({email_address(), binary() | charlist()})
-  defp try_lmtp_data(body, to, socket, extensions, options) when is_function(body) do
-    try_lmtp_data(body.(), to, socket, extensions, options)
-  end
-
-  defp try_lmtp_data(body, to, socket, _extensions, options) do
-    on_tx_error = :proplists.get_value(:on_transaction_error, options)
-    Postbeam.SMTP.Socket.send(socket, ~c"DATA\r\n")
-
-    case read_possible_multiline_reply(socket) do
-      {:ok, <<"354", _rest::binary>>} ->
-        escaped_body = :re.replace(body, "^\\.", "..", [:global, :multiline, return: :binary])
-        Postbeam.SMTP.Socket.send(socket, [escaped_body, ~c"\r\n.\r\n"])
-
-        :lists.map(
-          fn recipient ->
-            {:ok, receipt} = read_possible_multiline_reply(socket)
-            {recipient, receipt}
-          end,
-          to
-        )
-
-      {:ok, <<"4", _rest::binary>> = msg} when on_tx_error === :reset ->
-        rset_or_quit(socket)
-        throw({:temporary_failure, msg})
-
-      {:ok, <<"4", _rest::binary>> = msg} ->
-        quit(socket)
-        throw({:temporary_failure, msg})
-
-      {:ok, <<"5", _rest::binary>> = msg} when on_tx_error === :reset ->
-        rset_or_quit(socket)
-        throw({:permanent_failure, msg})
-
-      {:ok, msg} ->
-        quit(socket)
-        throw({:permanent_failure, msg})
-    end
-  end
-
-  @spec try_auth(Postbeam.SMTP.Socket.socket(), options(), list(charlist())) :: boolean()
-  defp try_auth(socket, options, []) do
-    case :proplists.get_value(:auth, options) do
-      :always ->
-        quit(socket)
-        throw({:missing_requirement, :auth})
-
-      _ ->
-        false
-    end
-  end
-
-  defp try_auth(socket, options, :undefined) do
-    case :proplists.get_value(:auth, options) do
-      :always ->
-        quit(socket)
-        throw({:missing_requirement, :auth})
-
-      _ ->
-        false
-    end
-  end
-
-  defp try_auth(socket, options, auth_types) do
-    case :erlang.and(
-           :erlang.and(
-             :proplists.is_defined(:username, options),
-             :proplists.is_defined(:password, options)
-           ),
-           :proplists.get_value(:auth, options) !== :never
-         ) do
-      false ->
-        case :proplists.get_value(:auth, options) do
-          :always ->
-            quit(socket)
-            throw({:missing_requirement, :auth})
-
-          _ ->
-            false
-        end
-
-      true ->
-        username = to_binary(:proplists.get_value(:username, options))
-        password = to_binary(:proplists.get_value(:password, options))
-        trace(options, ~c"Auth types: ~p~n", [auth_types])
-        types = :re.split(auth_types, ~c" ", [{:return, :list}, :trim])
-
-        case do_auth(socket, username, password, types, options) do
-          false ->
-            case :proplists.get_value(:auth, options) do
-              :always ->
-                quit(socket)
-                throw({:permanent_failure, :auth_failed})
-
-              _ ->
-                false
-            end
-
-          true ->
-            true
-        end
-    end
-  end
-
-  defp to_binary(string) when is_binary(string) do
-    string
-  end
-
-  defp to_binary(string) when is_list(string) do
-    :erlang.list_to_binary(string)
-  end
-
-  @spec do_auth(Postbeam.SMTP.Socket.socket(), binary(), binary(), list(charlist()), options()) ::
-          boolean()
-  defp do_auth(socket, username, password, types, options) do
-    fixed_types = for x <- types, into: [], do: :string.to_upper(x)
-    trace(options, ~c"Fixed types: ~p~n", [fixed_types])
-
-    allowed_types =
-      for x <- [~c"CRAM-MD5", ~c"LOGIN", ~c"PLAIN", ~c"XOAUTH2"],
-          :lists.member(x, fixed_types),
-          into: [],
-          do: x
-
-    trace(options, ~c"available authentication types, in order of preference: ~p~n", [
-      allowed_types
-    ])
-
-    do_auth_each(socket, username, password, allowed_types, options)
-  end
-
-  @spec do_auth_each(
-          Postbeam.SMTP.Socket.socket(),
-          binary(),
-          binary(),
-          list(charlist()),
-          options()
-        ) ::
-          boolean()
-  defp do_auth_each(_socket, _username, _password, [], _options) do
-    false
-  end
-
-  defp do_auth_each(socket, username, password, [~c"CRAM-MD5" | tail], options) do
-    Postbeam.SMTP.Socket.send(socket, ~c"AUTH CRAM-MD5\r\n")
-
-    case read_possible_multiline_reply(socket) do
-      {:ok, <<"334 ", rest::binary>>} ->
-        seed64 =
-          Postbeam.SMTP.Binary.strip(Postbeam.SMTP.Binary.strip(rest, :right, 10), :right, 13)
-
-        seed = :base64.decode(seed64)
-        digest = Postbeam.SMTP.Util.compute_cram_digest(password, seed)
-        string = :base64.encode(:erlang.list_to_binary([username, ~c" ", digest]))
-        Postbeam.SMTP.Socket.send(socket, [string, ~c"\r\n"])
-
-        case read_possible_multiline_reply(socket) do
-          {:ok, <<"235", _rest::binary>>} ->
-            trace(options, ~c"authentication accepted~n", [])
-            true
-
-          {:ok, msg} ->
-            trace(options, ~c"authentication rejected: ~s~n", [msg])
-            do_auth_each(socket, username, password, tail, options)
-        end
-
-      {:ok, something} ->
-        trace(options, ~c"got ~s~n", [something])
-        do_auth_each(socket, username, password, tail, options)
-    end
-  end
-
-  defp do_auth_each(socket, username, password, [~c"XOAUTH2" | tail], options) do
-    str =
-      :base64.encode(
-        :erlang.list_to_binary([~c"user=", username, 1, ~c"auth=Bearer ", password, 1, 1])
-      )
-
-    Postbeam.SMTP.Socket.send(socket, [~c"AUTH XOAUTH2 ", str, ~c"\r\n"])
-
-    case read_possible_multiline_reply(socket) do
-      {:ok, <<"235", _rest::binary>>} -> true
-      {:ok, _msg} -> do_auth_each(socket, username, password, tail, options)
-    end
-  end
-
-  defp do_auth_each(socket, username, password, [~c"LOGIN" | tail], options) do
-    Postbeam.SMTP.Socket.send(socket, ~c"AUTH LOGIN\r\n")
-    {:ok, prompt} = read_possible_multiline_reply(socket)
-
-    case is_auth_username_prompt(prompt) do
-      true ->
-        trace(options, ~c"username prompt~n", [])
-        u = :base64.encode(username)
-        Postbeam.SMTP.Socket.send(socket, [u, ~c"\r\n"])
-        {:ok, prompt2} = read_possible_multiline_reply(socket)
-
-        case is_auth_password_prompt(prompt2) do
-          true ->
-            trace(options, ~c"password prompt~n", [])
-            p = :base64.encode(password)
-            Postbeam.SMTP.Socket.send(socket, [p, ~c"\r\n"])
-
-            case read_possible_multiline_reply(socket) do
-              {:ok, <<"235 ", _rest::binary>>} ->
-                trace(options, ~c"authentication accepted~n", [])
-                true
-
-              {:ok, msg} ->
-                trace(options, ~c"password rejected: ~s", [msg])
-                do_auth_each(socket, username, password, tail, options)
-            end
-
-          false ->
-            trace(options, ~c"username rejected: ~s", [prompt2])
-            do_auth_each(socket, username, password, tail, options)
-        end
-
-      false ->
-        trace(options, ~c"got ~s~n", [prompt])
-        do_auth_each(socket, username, password, tail, options)
-    end
-  end
-
-  defp do_auth_each(socket, username, password, [~c"PLAIN" | tail], options) do
-    auth_string = :base64.encode(<<0, username::binary, 0, password::binary>>)
-    Postbeam.SMTP.Socket.send(socket, [~c"AUTH PLAIN ", auth_string, ~c"\r\n"])
-
-    case read_possible_multiline_reply(socket) do
-      {:ok, <<"235", _rest::binary>>} ->
-        trace(options, ~c"authentication accepted~n", [])
-        true
-
-      var_else ->
-        trace(options, ~c"authentication rejected ~p~n", [var_else])
-        do_auth_each(socket, username, password, tail, options)
-    end
-  end
-
-  defp do_auth_each(socket, username, password, [type | tail], options) do
-    trace(options, ~c"unsupported AUTH type ~s~n", [type])
-    do_auth_each(socket, username, password, tail, options)
-  end
-
-  defp is_auth_username_prompt("334 VXNlcm5hbWU6\r\n") do
-    true
-  end
-
-  defp is_auth_username_prompt("334 dXNlcm5hbWU6\r\n") do
-    true
-  end
-
-  defp is_auth_username_prompt(<<"334 VXNlcm5hbWU6 ", _::binary>>) do
-    true
-  end
-
-  defp is_auth_username_prompt(<<"334 dXNlcm5hbWU6 ", _::binary>>) do
-    true
-  end
-
-  defp is_auth_username_prompt(_) do
-    false
-  end
-
-  defp is_auth_password_prompt("334 UGFzc3dvcmQ6\r\n") do
-    true
-  end
-
-  defp is_auth_password_prompt("334 cGFzc3dvcmQ6\r\n") do
-    true
-  end
-
-  defp is_auth_password_prompt(<<"334 UGFzc3dvcmQ6 ", _::binary>>) do
-    true
-  end
-
-  defp is_auth_password_prompt(<<"334 cGFzc3dvcmQ6 ", _::binary>>) do
-    true
-  end
-
-  defp is_auth_password_prompt(_) do
-    false
-  end
-
-  @spec try_ehlo(Postbeam.SMTP.Socket.socket(), options()) :: {:ok, extensions()}
+  @spec try_ehlo(Socket.socket(), options()) :: {:ok, extensions()}
   defp try_ehlo(socket, options) do
     hallo =
       case :proplists.get_value(:protocol, options, :smtp) do
@@ -823,18 +421,18 @@ defmodule Postbeam.SMTP.Client do
       end
 
     :ok =
-      Postbeam.SMTP.Socket.send(socket, [
+      Socket.send(socket, [
         hallo,
         Keyword.fetch!(options, :hostname),
         ~c"\r\n"
       ])
 
-    case read_possible_multiline_reply(socket) do
+    case Reply.read_possible_multiline_reply(socket) do
       {:ok, <<"500", _rest::binary>>} ->
         try_helo(socket, options)
 
       {:ok, <<"4", _rest::binary>> = msg} ->
-        quit(socket)
+        Reply.quit(socket)
         throw({:temporary_failure, msg})
 
       {:ok, reply} ->
@@ -842,31 +440,31 @@ defmodule Postbeam.SMTP.Client do
     end
   end
 
-  @spec try_helo(Postbeam.SMTP.Socket.socket(), options()) :: {:ok, list()}
+  @spec try_helo(Socket.socket(), options()) :: {:ok, list()}
   defp try_helo(socket, options) do
     :ok =
-      Postbeam.SMTP.Socket.send(socket, [
+      Socket.send(socket, [
         ~c"HELO ",
         Keyword.fetch!(options, :hostname),
         ~c"\r\n"
       ])
 
-    case read_possible_multiline_reply(socket) do
+    case Reply.read_possible_multiline_reply(socket) do
       {:ok, <<"250", _rest::binary>>} ->
         {:ok, []}
 
       {:ok, <<"4", _rest::binary>> = msg} ->
-        quit(socket)
+        Reply.quit(socket)
         throw({:temporary_failure, msg})
 
       {:ok, msg} ->
-        quit(socket)
+        Reply.quit(socket)
         throw({:permanent_failure, msg})
     end
   end
 
-  @spec try_starttls(Postbeam.SMTP.Socket.socket(), options(), extensions()) ::
-          {Postbeam.SMTP.Socket.socket(), extensions()}
+  @spec try_starttls(Socket.socket(), options(), extensions()) ::
+          {Socket.socket(), extensions()}
   defp try_starttls(socket, options, extensions) do
     case {:proplists.get_value(:tls, options), :proplists.get_value("STARTTLS", extensions)} do
       {atom, true} when atom === :always or atom === :if_available ->
@@ -875,7 +473,7 @@ defmodule Postbeam.SMTP.Client do
         case {do_starttls(socket, options), atom} do
           {false, :always} ->
             trace(options, ~c"TLS failed~n", [])
-            quit(socket)
+            Reply.quit(socket)
             throw({:temporary_failure, :tls_failed})
 
           {false, :if_available} ->
@@ -888,7 +486,7 @@ defmodule Postbeam.SMTP.Client do
         end
 
       {:always, _} ->
-        quit(socket)
+        Reply.quit(socket)
         throw({:missing_requirement, :tls})
 
       _ ->
@@ -897,67 +495,70 @@ defmodule Postbeam.SMTP.Client do
     end
   end
 
-  @spec do_starttls(Postbeam.SMTP.Socket.socket(), options()) ::
-          {Postbeam.SMTP.Socket.socket(), extensions()} | false
+  @spec do_starttls(Socket.socket(), options()) ::
+          {Socket.socket(), extensions()} | false
   defp do_starttls(socket, options) do
-    Postbeam.SMTP.Socket.send(socket, ~c"STARTTLS\r\n")
+    Socket.send(socket, ~c"STARTTLS\r\n")
 
-    case read_possible_multiline_reply(socket) do
+    case Reply.read_possible_multiline_reply(socket) do
       {:ok, <<"220", _rest::binary>>} ->
-        case (try do
-                Postbeam.SMTP.Socket.to_ssl_client(
-                  socket,
-                  [:binary | :proplists.get_value(:tls_options, options, [])],
-                  5000
-                )
-              catch
-                :throw, term -> term
-                :exit, reason -> {:EXIT, reason}
-                :error, reason -> {:EXIT, {reason, __STACKTRACE__}}
-              end) do
-          {:ok, new_socket} ->
-            {:ok, extensions} = try_ehlo(new_socket, options)
-            {new_socket, extensions}
-
-          {:EXIT, reason} ->
-            quit(socket)
-            :error_logger.error_msg(~c"Error in ssl upgrade: ~p.~n", [reason])
-            throw({:temporary_failure, :tls_failed})
-
-          {:error, :closed} ->
-            quit(socket)
-            :error_logger.error_msg(~c"Error in ssl upgrade: socket closed.~n")
-            throw({:temporary_failure, :tls_failed})
-
-          {:error, :ssl_not_started} ->
-            quit(socket)
-            :error_logger.error_msg(~c"SSL not started.~n")
-            throw({:permanent_failure, :ssl_not_started})
-
-          {:error, reason} ->
-            quit(socket)
-            trace(options, ~c"TLS negotiation failed: ~p~n", [reason])
-            throw({:temporary_failure, :tls_failed})
-
-          var_else ->
-            trace(options, ~c"~p~n", [var_else])
-            false
-        end
+        upgrade_tls(socket, options)
 
       {:ok, <<"4", _rest::binary>> = msg} ->
-        quit(socket)
+        Reply.quit(socket)
         throw({:temporary_failure, msg})
 
       {:ok, msg} ->
-        quit(socket)
+        Reply.quit(socket)
         throw({:permanent_failure, msg})
     end
   end
 
-  defp connect(host, options) when is_binary(host) do
-    connect(:erlang.binary_to_list(host), options)
+  @spec upgrade_tls(Socket.socket(), options()) :: {Socket.socket(), extensions()} | false
+  defp upgrade_tls(socket, options) do
+    case (try do
+            Socket.to_ssl_client(
+              socket,
+              [:binary | :proplists.get_value(:tls_options, options, [])],
+              5000
+            )
+          catch
+            :throw, term -> term
+            :exit, reason -> {:EXIT, reason}
+            :error, reason -> {:EXIT, {reason, __STACKTRACE__}}
+          end) do
+      {:ok, new_socket} ->
+        {:ok, extensions} = try_ehlo(new_socket, options)
+        {new_socket, extensions}
+
+      {:EXIT, reason} ->
+        Reply.quit(socket)
+        :error_logger.error_msg(~c"Error in ssl upgrade: ~p.~n", [reason])
+        throw({:temporary_failure, :tls_failed})
+
+      {:error, :closed} ->
+        Reply.quit(socket)
+        :error_logger.error_msg(~c"Error in ssl upgrade: socket closed.~n")
+        throw({:temporary_failure, :tls_failed})
+
+      {:error, :ssl_not_started} ->
+        Reply.quit(socket)
+        :error_logger.error_msg(~c"SSL not started.~n")
+        throw({:permanent_failure, :ssl_not_started})
+
+      {:error, reason} ->
+        Reply.quit(socket)
+        trace(options, ~c"TLS negotiation failed: ~p~n", [reason])
+        throw({:temporary_failure, :tls_failed})
+
+      var_else ->
+        trace(options, ~c"~p~n", [var_else])
+        false
+    end
   end
 
+  @spec connect(smtp_host(), options()) ::
+          {:ok, Socket.socket(), smtp_host() | :inet.ip_address(), binary()}
   defp connect(host, options) do
     proto = if Keyword.get(options, :ssl, false), do: :ssl, else: :tcp
     port = Keyword.get(options, :port, if(proto == :ssl, do: 465, else: 25))
@@ -973,18 +574,18 @@ defmodule Postbeam.SMTP.Client do
 
     sock_opts = [:binary, {:packet, :line}, {:keepalive, true}, {:active, false} | extra_options]
 
-    case Postbeam.SMTP.Socket.connect(proto, host, port, sock_opts, timeout) do
+    case Socket.connect(proto, host, port, sock_opts, timeout) do
       {:ok, socket} ->
-        case read_possible_multiline_reply(socket) do
+        case Reply.read_possible_multiline_reply(socket) do
           {:ok, <<"220", banner::binary>>} ->
             {:ok, socket, host, banner}
 
           {:ok, <<"4", _rest::binary>> = msg} ->
-            quit(socket)
+            Reply.quit(socket)
             throw({:temporary_failure, msg})
 
           {:ok, msg} ->
-            quit(socket)
+            Reply.quit(socket)
             throw({:permanent_failure, msg})
         end
 
@@ -993,62 +594,7 @@ defmodule Postbeam.SMTP.Client do
     end
   end
 
-  @spec read_possible_multiline_reply(Postbeam.SMTP.Socket.socket()) :: {:ok, binary()}
-  defp read_possible_multiline_reply(socket) do
-    case Postbeam.SMTP.Socket.recv(socket, 0, 1_200_000) do
-      {:ok, <<a, b, c, separator, _::binary>> = packet}
-      when a in ?0..?9 and b in ?0..?9 and c in ?0..?9 and separator in [?-, ?\s] ->
-        if separator == ?- do
-          read_multiline_reply(socket, <<a, b, c>>, [packet])
-        else
-          {:ok, packet}
-        end
-
-      {:ok, packet} ->
-        quit(socket)
-        throw({:unexpected_response, packet})
-
-      error ->
-        quit(socket)
-        throw({:network_failure, error})
-    end
-  end
-
-  @spec read_multiline_reply(Postbeam.SMTP.Socket.socket(), binary(), list(binary())) ::
-          {:ok, binary()}
-  defp read_multiline_reply(socket, code, acc) do
-    case Postbeam.SMTP.Socket.recv(socket, 0, 1_200_000) do
-      {:ok, <<^code::binary-size(3), ?\s, _::binary>> = packet} ->
-        {:ok, [packet | acc] |> Enum.reverse() |> IO.iodata_to_binary()}
-
-      {:ok, <<^code::binary-size(3), ?-, _::binary>> = packet} ->
-        read_multiline_reply(socket, code, [packet | acc])
-
-      {:ok, packet} ->
-        quit(socket)
-        throw({:unexpected_response, Enum.reverse([packet | acc])})
-
-      error ->
-        quit(socket)
-        throw({:network_failure, error})
-    end
-  end
-
-  defp rset_or_quit(socket) do
-    :ok = Postbeam.SMTP.Socket.send(socket, ~c"RSET\r\n")
-
-    case read_possible_multiline_reply(socket) do
-      {:ok, <<"250", _rest::binary>>} -> :ok
-      {:ok, _msg} -> quit(socket)
-    end
-  end
-
-  defp quit(socket) do
-    Postbeam.SMTP.Socket.send(socket, ~c"QUIT\r\n")
-    Postbeam.SMTP.Socket.close(socket)
-    :ok
-  end
-
+  @spec check_options(options()) :: :ok | {:error, validate_options_error()}
   defp check_options(options) do
     checked_options = [:relay, :port, :auth]
 
@@ -1068,6 +614,7 @@ defmodule Postbeam.SMTP.Client do
     )
   end
 
+  @spec check_option({atom(), term()}, options()) :: :ok | {:error, validate_options_error()}
   defp check_option({:relay, :undefined}, _options) do
     {:error, :no_relay}
   end
@@ -1110,16 +657,16 @@ defmodule Postbeam.SMTP.Client do
         into: [],
         do:
           (
-            body = Postbeam.SMTP.Binary.substr(entry, 5)
+            body = Binary.substr(entry, 5)
 
             case :re.split(body, ~c" ", [{:return, :binary}, :trim, parts: 2]) do
               [verb, parameters] ->
-                {Postbeam.SMTP.Binary.to_upper(verb), parameters}
+                {Binary.to_upper(verb), parameters}
 
               [^body] ->
-                case Postbeam.SMTP.Binary.strchr(body, 61) do
+                case Binary.strchr(body, 61) do
                   0 ->
-                    {Postbeam.SMTP.Binary.to_upper(body), true}
+                    {Binary.to_upper(body), true}
 
                   _ ->
                     trace(options, ~c"discarding option ~p~n", [body])
@@ -1129,6 +676,7 @@ defmodule Postbeam.SMTP.Client do
           )
   end
 
+  @spec trace(options(), charlist(), list()) :: term()
   defp trace(options, format, args) do
     case :proplists.get_value(:trace_fun, options) do
       :undefined -> :ok

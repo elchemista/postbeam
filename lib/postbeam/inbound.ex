@@ -27,6 +27,8 @@ defmodule Postbeam.Inbound do
   See `docs/inbound.md` for setup, callback examples and delivery guarantees.
   """
 
+  alias Postbeam.SMTP.Server
+
   alias Postbeam.Config
   alias Postbeam.Inbound.Message
   alias Postbeam.Inbound.Session
@@ -91,7 +93,7 @@ defmodule Postbeam.Inbound do
     ]
 
     config[:name]
-    |> Postbeam.SMTP.Server.child_spec(Session, server_options)
+    |> Server.child_spec(Session, server_options)
     |> Supervisor.child_spec(id: {__MODULE__, config[:name]})
   end
 

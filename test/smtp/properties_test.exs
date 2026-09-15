@@ -2,6 +2,11 @@ defmodule Postbeam.SMTP.PropertiesTest do
   use ExUnit.Case, async: false
   @moduletag timeout: 120_000, capture_log: true
 
+  @property_cases (case Integer.parse(System.get_env("SMTP_PROPERTY_CASES", "200")) do
+                     {count, ""} when count > 0 -> count
+                     _ -> raise ArgumentError, "SMTP_PROPERTY_CASES must be a positive integer"
+                   end)
+
   for {module, properties} <- [
         postbeam_smtp_prop_rfc5322: [
           :prop_encode_no_crash,
@@ -23,7 +28,7 @@ defmodule Postbeam.SMTP.PropertiesTest do
     test "#{module}.#{property}" do
       assert :proper.quickcheck(
                apply(unquote(module), unquote(property), []),
-               [:quiet, numtests: 200, max_size: 30]
+               [:quiet, numtests: @property_cases, max_size: 30]
              )
     end
   end

@@ -11,6 +11,8 @@ defmodule Postbeam.SMTP do
   `connect_timeout` additionally bounds each TCP connection.
   """
 
+  alias Postbeam.SMTP.Client
+
   alias Postbeam.Config
   alias Postbeam.Message
   alias Postbeam.MX
@@ -104,7 +106,7 @@ defmodule Postbeam.SMTP do
           Config.t()
         ) :: term()
   defp transact(parent, token, address, host, message, config) do
-    case Postbeam.SMTP.Client.open(options(address, host, config)) do
+    case Client.open(options(address, host, config)) do
       {:ok, socket} ->
         send(parent, {token, :envelope})
 
@@ -114,7 +116,7 @@ defmodule Postbeam.SMTP do
           message.data
         end
 
-        Postbeam.SMTP.Client.deliver(socket, {message.from, [message.to], body})
+        Client.deliver(socket, {message.from, [message.to], body})
 
       error ->
         error

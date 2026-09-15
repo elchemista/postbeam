@@ -22,7 +22,11 @@
 
 defmodule Postbeam.SMTP.DKIM do
   @moduledoc "DKIM signing and canonicalization for already encoded MIME messages."
-  @spec sign(list(binary()), binary(), Postbeam.SMTP.MIME.dkim_options()) :: list(binary())
+
+  alias Postbeam.SMTP.Binary
+  alias Postbeam.SMTP.MIME
+  @spec sign(list(binary()), binary(), MIME.dkim_options()) :: list(binary())
+  @doc "Prepends a DKIM signature to encoded headers using the supplied signing options."
   def sign(headers, body, opts) do
     headers_to_sign = :proplists.get_value(:h, opts, ["from", "to", "subject", "date"])
     s_did = :proplists.get_value(:d, opts)
@@ -68,6 +72,7 @@ defmodule Postbeam.SMTP.DKIM do
     [dkim_header | headers]
   end
 
+  @spec dkim_filter_headers([binary()], [binary()]) :: [binary()]
   defp dkim_filter_headers(headers, headers_to_sign) do
     keyed_headers =
       for hdr <- headers,
@@ -75,21 +80,23 @@ defmodule Postbeam.SMTP.DKIM do
           do:
             (
               [name, _] = :binary.split(hdr, ":")
-              {Postbeam.SMTP.Binary.strip(Postbeam.SMTP.Binary.to_lower(name)), hdr}
+              {Binary.strip(Binary.to_lower(name)), hdr}
             )
 
     with_undef =
       for name <- headers_to_sign,
           into: [],
           do:
-            Postbeam.SMTP.MIME.get_header_value(
-              Postbeam.SMTP.Binary.to_lower(name),
+            MIME.get_header_value(
+              Binary.to_lower(name),
               keyed_headers
             )
 
     for hdr <- with_undef, hdr !== :undefined, into: [], do: hdr
   end
 
+  @doc "Canonicalizes encoded headers with the selected DKIM algorithm."
+  @spec canonicalize_headers([binary()], :simple | :relaxed) :: [binary()]
   def canonicalize_headers(headers, :simple) do
     headers
   end
@@ -98,16 +105,17 @@ defmodule Postbeam.SMTP.DKIM do
     dkim_canonic_hdrs_relaxed(headers)
   end
 
+  @spec dkim_canonic_hdrs_relaxed([binary()]) :: [binary()]
   defp dkim_canonic_hdrs_relaxed([hdr | rest]) do
     [name, value] = :binary.split(hdr, ":")
-    low_strip_name = Postbeam.SMTP.Binary.to_lower(Postbeam.SMTP.Binary.strip(name))
+    low_strip_name = Binary.to_lower(Binary.strip(name))
     unfolded_hdr_value = :binary.replace(value, "\r\n", <<>>, [:global])
 
     single_ws_value =
       :re.replace(unfolded_hdr_value, ~c"[\t ]+", ~c" ", [:global, return: :binary])
 
     stripped_with_name =
-      <<low_strip_name::binary, ":", Postbeam.SMTP.Binary.strip(single_ws_value)::binary>>
+      <<low_strip_name::binary, ":", Binary.strip(single_ws_value)::binary>>
 
     [stripped_with_name | dkim_canonic_hdrs_relaxed(rest)]
   end
@@ -116,6 +124,8 @@ defmodule Postbeam.SMTP.DKIM do
     []
   end
 
+  @doc "Canonicalizes a body for DKIM; relaxed body canonicalization is unsupported."
+  @spec canonicalize_body(binary(), :simple | :relaxed) :: binary()
   def canonicalize_body(<<>>, :simple) do
     "\r\n"
   end
@@ -128,16 +138,24 @@ defmodule Postbeam.SMTP.DKIM do
     throw({:not_supported, :dkim_body_relaxed})
   end
 
+  @spec dkim_hash_body(binary()) :: binary()
   defp dkim_hash_body(canonic_body) do
     :crypto.hash(:sha256, canonic_body)
   end
 
+  @spec dkim_hash_data([binary()], binary()) :: binary()
   defp dkim_hash_data(canonic_headers, dkim_header) do
     joined_headers = for hdr <- canonic_headers, into: <<>>, do: <<hdr::binary, "\r\n">>
     :crypto.hash(:sha256, <<joined_headers::binary, dkim_header::binary>>)
   end
 
-  def ed25519_supported() do
+  @doc "Reports whether the public_key application supports Ed25519 signing."
+  @spec ed25519_supported?() :: boolean()
+  def ed25519_supported?, do: ed25519_supported()
+
+  @doc "Reports whether Ed25519 signing is available; prefer `ed25519_supported?/0`."
+  @spec ed25519_supported() :: boolean()
+  def ed25519_supported do
     {:ok, public_key_app_version_string} = :application.get_key(:public_key, :vsn)
 
     public_key_app_version_list =
@@ -146,6 +164,7 @@ defmodule Postbeam.SMTP.DKIM do
     public_key_app_version_list >= [1, 11, 2]
   end
 
+  @spec dkim_get_algorithm_digest(:"rsa-sha256" | :"ed25519-sha256") :: :sha256 | :none
   defp dkim_get_algorithm_digest(algorithm) do
     case algorithm do
       :"rsa-sha256" ->
@@ -159,6 +178,11 @@ defmodule Postbeam.SMTP.DKIM do
     end
   end
 
+  @spec dkim_sign(
+          binary(),
+          :"rsa-sha256" | :"ed25519-sha256",
+          {:pem_plain, binary()} | {:pem_encrypted, binary(), charlist()}
+        ) :: binary()
   defp dkim_sign(data_hash, algorithm, {:pem_plain, priv_bin}) do
     [priv_entry] = :public_key.pem_decode(priv_bin)
     digest = dkim_get_algorithm_digest(algorithm)
@@ -173,21 +197,23 @@ defmodule Postbeam.SMTP.DKIM do
     :public_key.sign({:digest, data_hash}, digest, key)
   end
 
+  @spec dkim_make_header([{atom() | binary(), term()}]) :: binary()
   defp dkim_make_header(tags) do
     rev_tags = :lists.reverse(tags)
 
     encoded_tags =
-      Postbeam.SMTP.Binary.join(
+      Binary.join(
         for({k, v} <- rev_tags, into: [], do: dkim_encode_tag(k, v)),
         "; "
       )
 
-    Postbeam.SMTP.Binary.join(
-      Postbeam.SMTP.MIME.encode_headers([{"DKIM-Signature", encoded_tags}]),
+    Binary.join(
+      MIME.encode_headers([{"DKIM-Signature", encoded_tags}]),
       "\r\n"
     )
   end
 
+  @spec dkim_encode_tag(atom() | binary(), term()) :: binary()
   defp dkim_encode_tag(:v, 1) do
     "v=1"
   end
@@ -220,8 +246,8 @@ defmodule Postbeam.SMTP.DKIM do
 
   defp dkim_encode_tag(:h, hdrs) do
     joined =
-      Postbeam.SMTP.Binary.join(
-        for(h <- hdrs, into: [], do: Postbeam.SMTP.Binary.to_lower(h)),
+      Binary.join(
+        for(h <- hdrs, into: [], do: Binary.to_lower(h)),
         ":"
       )
 
@@ -264,11 +290,13 @@ defmodule Postbeam.SMTP.DKIM do
     <<k::binary, v::binary>>
   end
 
+  @spec dkim_qp_tag_value(binary()) :: binary()
   defp dkim_qp_tag_value(value) do
-    [q_p_value] = Postbeam.SMTP.MIME.encode_quoted_printable(value)
+    [q_p_value] = MIME.encode_quoted_printable(value)
     :binary.replace(q_p_value, ";", "=3B")
   end
 
+  @spec datetime_to_bin_timestamp(:calendar.datetime()) :: binary()
   defp datetime_to_bin_timestamp(date_time) do
     epoch_start = 62_167_219_200
     unix_timestamp = :calendar.datetime_to_gregorian_seconds(date_time) - epoch_start

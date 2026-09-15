@@ -9,10 +9,12 @@ defmodule Postbeam.SMTP.Handler do
   `handle_DATA/4` must acknowledge only after the message has been accepted by
   your storage or delivery system. Callbacks execute in the session process.
   """
+
+  alias Postbeam.SMTP.Session
   @type state() :: term()
   @type error_message() :: {:error, charlist(), state()}
-  @type error_class() :: Postbeam.SMTP.Session.error_class()
-  @type protocol_message() :: Postbeam.SMTP.Session.protocol_message()
+  @type error_class() :: Session.error_class()
+  @type protocol_message() :: Session.protocol_message()
 
   @callback init(:inet.hostname(), session_count, :inet.ip_address(), any()) ::
               {:ok, iodata(), state()} | {:stop, any(), iodata()} | :ignore

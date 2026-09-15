@@ -1,15 +1,20 @@
 defmodule Postbeam.Application do
   @moduledoc "Application supervisor for outbound deliveries and incoming DATA readers."
+
+  alias Postbeam.SMTP.ClientSupervisor
+  alias Postbeam.SMTP.DataSupervisor
   use Application
 
-  @impl true
+  @impl Application
+  @doc false
+  @spec start(Application.start_type(), term()) :: Supervisor.on_start()
   def start(_type, _args) do
     children = [
       {Task.Supervisor,
-       name: Postbeam.SMTP.ClientSupervisor,
+       name: ClientSupervisor,
        max_children: Application.get_env(:postbeam, :max_outbound_connections, 1024)},
-      Supervisor.child_spec({Task.Supervisor, name: Postbeam.SMTP.DataSupervisor},
-        id: Postbeam.SMTP.DataSupervisor
+      Supervisor.child_spec({Task.Supervisor, name: DataSupervisor},
+        id: DataSupervisor
       )
     ]
 

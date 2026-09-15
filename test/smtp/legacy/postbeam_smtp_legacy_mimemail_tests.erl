@@ -81,17 +81,17 @@ dkim_canonicalize_headers(A1, A2) -> 'Elixir.Postbeam.SMTP.DKIM':canonicalize_he
 ed25519_supported() -> 'Elixir.Postbeam.SMTP.DKIM':ed25519_supported().
 encode(A1) -> 'Elixir.Postbeam.SMTP.MIME':encode(A1).
 encode(A1, A2) -> 'Elixir.Postbeam.SMTP.MIME':encode(A1, A2).
-encode_parameters(A1) -> 'Elixir.Postbeam.SMTP.MIME':encode_parameters(A1).
+encode_parameters(A1) -> 'Elixir.Postbeam.SMTP.MIME.Parameters':encode_parameters(A1).
 encode_quoted_printable(A1) -> 'Elixir.Postbeam.SMTP.MIME':encode_quoted_printable(A1).
-has_lines_over_998(A1) -> 'Elixir.Postbeam.SMTP.MIME':has_lines_over_998(A1).
+has_lines_over_998(A1) -> 'Elixir.Postbeam.SMTP.MIME':'has_lines_over_998?'(A1).
 parse_content_disposition(A1) -> 'Elixir.Postbeam.SMTP.MIME':parse_content_disposition(A1).
 parse_content_type(A1) -> 'Elixir.Postbeam.SMTP.MIME':parse_content_type(A1).
 parse_headers(A1) -> 'Elixir.Postbeam.SMTP.MIME':parse_headers(A1).
 parse_with_comments(A1) -> 'Elixir.Postbeam.SMTP.MIME':parse_with_comments(A1).
-rfc2047_utf8_encode(A1) -> 'Elixir.Postbeam.SMTP.MIME':rfc2047_utf8_encode(A1).
-rfc2047_utf8_encode(A1, A2, A3, A4, A5) -> 'Elixir.Postbeam.SMTP.MIME':rfc2047_utf8_encode(A1, A2, A3, A4, A5).
+rfc2047_utf8_encode(A1) -> 'Elixir.Postbeam.SMTP.MIME.EncodedWord':rfc2047_utf8_encode(A1).
+rfc2047_utf8_encode(A1, A2, A3, A4, A5) -> 'Elixir.Postbeam.SMTP.MIME.EncodedWord':rfc2047_utf8_encode(A1, A2, A3, A4, A5).
 split_body_by_boundary_(A1, A2, A3, A4) -> 'Elixir.Postbeam.SMTP.MIME':split_body_by_boundary_(A1, A2, A3, A4).
-valid_7bit(A1) -> 'Elixir.Postbeam.SMTP.MIME':valid_7bit(A1).
+valid_7bit(A1) -> 'Elixir.Postbeam.SMTP.MIME':'valid_7bit?'(A1).
 
 
 parse_with_comments_test_() ->

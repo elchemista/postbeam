@@ -29,6 +29,11 @@ defmodule Postbeam.SMTP.Server do
   `:max_connections` to 1024 per Ranch connection supervisor; `:ranch_opts`
   exposes Ranch's remaining tuning options and takes precedence.
   """
+
+  alias Postbeam.SMTP.Log
+  alias Postbeam.SMTP.Session
+  alias Postbeam.SMTP.Util
+
   if Mix.env() == :test do
     @compile [:export_all, :nowarn_export_all]
   end
@@ -45,9 +50,10 @@ defmodule Postbeam.SMTP.Server do
             | {:max_connections, pos_integer() | :infinity}
             | {:name, term()}
             | {:ranch_opts, :ranch.opts()}
-            | {:sessionoptions, Postbeam.SMTP.Session.options()}
+            | {:sessionoptions, Session.options()}
           )
   @spec start(server_name(), module(), options()) :: {:ok, pid()} | {:error, any()}
+  @doc "Starts a named SMTP listener using the handler and options."
   def start(server_name, callback_module, options) when is_list(options) do
     case convert_options(callback_module, options) do
       {:ok, transport, transport_opts, protocol_opts} ->
@@ -55,7 +61,7 @@ defmodule Postbeam.SMTP.Server do
           server_name,
           transport,
           transport_opts,
-          Postbeam.SMTP.Session,
+          Session,
           protocol_opts
         )
 
@@ -64,6 +70,8 @@ defmodule Postbeam.SMTP.Server do
     end
   end
 
+  @doc "Builds a Ranch listener child specification for a supervision tree."
+  @spec child_spec(server_name(), module(), options()) :: Supervisor.child_spec()
   def child_spec(server_name, callback_module, options) do
     case convert_options(callback_module, options) do
       {:ok, transport, transport_opts, protocol_opts} ->
@@ -71,7 +79,7 @@ defmodule Postbeam.SMTP.Server do
           server_name,
           transport,
           transport_opts,
-          Postbeam.SMTP.Session,
+          Session,
           protocol_opts
         )
 
@@ -81,6 +89,7 @@ defmodule Postbeam.SMTP.Server do
   end
 
   @doc "Starts a Ranch listener beneath your application's supervisor."
+  @spec child_spec({module(), options()} | keyword()) :: Supervisor.child_spec()
   def child_spec({callback_module, options}) do
     name = Keyword.get(options, :name, {__MODULE__, callback_module})
     child_spec(name, callback_module, options)
@@ -90,6 +99,8 @@ defmodule Postbeam.SMTP.Server do
     child_spec({Keyword.fetch!(options, :handler), Keyword.delete(options, :handler)})
   end
 
+  @spec convert_options(module(), options()) ::
+          {:ok, module(), map(), {module(), Session.options()}} | {:error, :invalid_lmtp_port}
   defp convert_options(callback_module, options) do
     transport =
       case :proplists.get_value(:protocol, options, :tcp) do
@@ -100,13 +111,13 @@ defmodule Postbeam.SMTP.Server do
     family = :proplists.get_value(:family, options, :inet)
     address = :proplists.get_value(:address, options, {0, 0, 0, 0})
     port = :proplists.get_value(:port, options, 2525)
-    hostname = Keyword.get_lazy(options, :domain, &Postbeam.SMTP.Util.guess_fqdn/0)
+    hostname = Keyword.get_lazy(options, :domain, &Util.guess_fqdn/0)
     protocol_opts = :proplists.get_value(:sessionoptions, options, [])
     email_transfer_protocol = :proplists.get_value(:protocol, protocol_opts, :smtp)
 
     case {email_transfer_protocol, port} do
       {:lmtp, 25} ->
-        Postbeam.SMTP.Log.error(
+        Log.error(
           ~c"LMTP is different from SMTP, it MUST NOT be used on the TCP port 25",
           %{domain: [:postbeam, :server]}
         )
@@ -133,21 +144,25 @@ defmodule Postbeam.SMTP.Server do
   end
 
   @spec start(module(), options()) :: {:ok, pid()} | :ignore | {:error, any()}
+  @doc "Starts a named SMTP listener using the handler and options."
   def start(callback_module, options) when is_list(options) do
-    start(Postbeam.SMTP.Server, callback_module, options)
+    start(__MODULE__, callback_module, options)
   end
 
   @spec start(atom()) :: {:ok, pid()} | :ignore | {:error, any()}
+  @doc "Starts a named SMTP listener using the handler and options."
   def start(callback_module) do
     start(callback_module, [])
   end
 
   @spec stop(server_name()) :: :ok
+  @doc "Stops the named listener and its connections."
   def stop(name) do
     :ranch.stop_listener(name)
   end
 
   @spec sessions(server_name()) :: list(pid())
+  @doc "Lists connection processes owned by the listener."
   def sessions(name) do
     :ranch.procs(name, :connections)
   end

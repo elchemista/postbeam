@@ -1,8 +1,8 @@
-# Preserve the imported SMTP callback API and protocol branch structure.
-# credo:disable-for-this-file Credo.Check.Refactor.Nesting
 defmodule Postbeam.SMTP.TLS do
   @moduledoc false
 
+  @doc false
+  @spec client_options(list()) :: list()
   def client_options(options) do
     options = put_new(options, :verify, :verify_peer)
 
@@ -15,22 +15,32 @@ defmodule Postbeam.SMTP.TLS do
     end
   end
 
+  @doc false
+  @spec server_options(list()) :: list()
   def server_options(options) do
     # Recent OTP releases require default credentials even when SNI is configured.
     case :proplists.get_value(:sni_hosts, options, []) do
       [{_host, defaults} | _] ->
-        Enum.reduce([:certs_keys, :cert, :certfile, :key, :keyfile], options, fn key, acc ->
-          case :proplists.get_value(key, defaults) do
-            :undefined -> acc
-            value -> put_new(acc, key, value)
-          end
-        end)
+        Enum.reduce(
+          [:certs_keys, :cert, :certfile, :key, :keyfile],
+          options,
+          &inherit_option(&2, defaults, &1)
+        )
 
       _ ->
         options
     end
   end
 
+  @spec inherit_option(list(), list(), atom()) :: list()
+  defp inherit_option(options, defaults, key) do
+    case :proplists.get_value(key, defaults) do
+      :undefined -> options
+      value -> put_new(options, key, value)
+    end
+  end
+
+  @spec put_new(list(), atom(), term()) :: list()
   defp put_new(options, key, value) do
     if :proplists.is_defined(key, options), do: options, else: [{key, value} | options]
   end

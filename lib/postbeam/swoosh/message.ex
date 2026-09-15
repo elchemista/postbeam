@@ -7,6 +7,7 @@ if Code.ensure_loaded?(Swoosh.Email) do
     alias Postbeam.Config
     alias Postbeam.Headers
     alias Postbeam.Message
+    alias Postbeam.Validation
     alias Swoosh.Email
 
     @type error :: Message.validation_error() | {:unsupported, :provider_options}
@@ -37,7 +38,7 @@ if Code.ensure_loaded?(Swoosh.Email) do
 
     @spec mailbox(term(), atom()) :: {:ok, Headers.mailbox()} | {:error, {:invalid, atom()}}
     defp mailbox({name, address}, field) do
-      with :ok <- validate(Config.header?(name), field),
+      with :ok <- Validation.check(Config.header?(name), field),
            {:ok, normalized, _} <- Address.new(address, field) do
         {:ok, {name, normalized}}
       end
@@ -47,7 +48,7 @@ if Code.ensure_loaded?(Swoosh.Email) do
 
     @spec mailboxes(term(), atom()) :: {:ok, [Headers.mailbox()]} | {:error, {:invalid, atom()}}
     defp mailboxes(values, field) when is_list(values) do
-      map_validated(values, &mailbox(&1, field))
+      Validation.map(values, &mailbox(&1, field))
     end
 
     defp mailboxes(_, field), do: {:error, {:invalid, field}}
@@ -73,18 +74,23 @@ if Code.ensure_loaded?(Swoosh.Email) do
     @spec attachments(term(), String.t() | nil) ::
             {:ok, [Attachment.t()]} | {:error, {:invalid, :attachments}}
     defp attachments(values, html) when is_list(values) do
-      with {:ok, attachments} <- map_validated(values, &attachment/1) do
-        inline = Enum.filter(attachments, &(&1.type == :inline))
-        cids = Enum.map(inline, & &1.cid)
-
-        with :ok <- validate(inline == [] or is_binary(html), :attachments),
-             :ok <- validate(length(cids) == MapSet.size(MapSet.new(cids)), :attachments) do
-          {:ok, attachments}
-        end
+      with {:ok, attachments} <- Validation.map(values, &attachment/1),
+           :ok <- validate_inline(attachments, html) do
+        {:ok, attachments}
       end
     end
 
     defp attachments(_, _), do: {:error, {:invalid, :attachments}}
+
+    @spec validate_inline([Attachment.t()], String.t() | nil) ::
+            :ok | {:error, {:invalid, :attachments}}
+    defp validate_inline(attachments, html) do
+      cids = for %{type: :inline, cid: cid} <- attachments, do: cid
+
+      with :ok <- Validation.check(cids == [] or is_binary(html), :attachments) do
+        Validation.check(length(cids) == MapSet.size(MapSet.new(cids)), :attachments)
+      end
+    end
 
     @spec attachment(term()) :: {:ok, Attachment.t()} | {:error, {:invalid, :attachments}}
     defp attachment(%Swoosh.Attachment{} = attachment),
@@ -95,7 +101,7 @@ if Code.ensure_loaded?(Swoosh.Email) do
     @spec build_messages(Email.t(), Headers.mailbox(), [String.t()], Headers.t(), [Attachment.t()]) ::
             {:ok, [Message.t()]} | {:error, Message.validation_error()}
     defp build_messages(email, {_name, sender}, recipients, headers, attachments) do
-      map_validated(recipients, fn recipient ->
+      Validation.map(recipients, fn recipient ->
         with {:ok, message} <-
                Message.new(%{
                  from: sender,
@@ -108,24 +114,5 @@ if Code.ensure_loaded?(Swoosh.Email) do
         end
       end)
     end
-
-    @spec map_validated([input], (input -> {:ok, output} | {:error, error})) ::
-            {:ok, [output]} | {:error, error}
-          when input: var, output: var, error: var
-    defp map_validated(values, convert) do
-      result =
-        Enum.reduce_while(values, {:ok, []}, fn value, {:ok, acc} ->
-          case convert.(value) do
-            {:ok, normalized} -> {:cont, {:ok, [normalized | acc]}}
-            {:error, _} = error -> {:halt, error}
-          end
-        end)
-
-      with {:ok, reversed} <- result, do: {:ok, Enum.reverse(reversed)}
-    end
-
-    @spec validate(boolean(), atom()) :: :ok | {:error, {:invalid, atom()}}
-    defp validate(true, _), do: :ok
-    defp validate(false, field), do: {:error, {:invalid, field}}
   end
 end

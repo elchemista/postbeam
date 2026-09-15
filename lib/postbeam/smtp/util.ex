@@ -1,6 +1,4 @@
-# Preserve the imported SMTP callback API and protocol branch structure.
 # credo:disable-for-this-file Credo.Check.Readability.FunctionNames
-# credo:disable-for-this-file Credo.Check.Readability.PredicateFunctionNames
 # Copyright 2009 Andrew Thompson <andrew@hijacked.us>. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -40,6 +38,8 @@ defmodule Postbeam.SMTP.Util do
   )
 
   @typep name_address() :: {charlist() | :undefined, charlist()}
+  @doc "Returns MX records ordered by preference."
+  @spec mxlookup(:inet.hostname() | binary()) :: [{non_neg_integer(), :inet.hostname()}]
   def mxlookup(domain) do
     domain = if is_binary(domain), do: String.to_charlist(domain), else: domain
 
@@ -50,13 +50,14 @@ defmodule Postbeam.SMTP.Util do
   end
 
   @spec guess_FQDN() :: charlist()
-  def guess_FQDN() do
+  @doc "Returns the local fully qualified hostname."
+  def guess_FQDN do
     guess_fqdn()
   end
 
   @doc "Returns the local fully qualified hostname, falling back to localhost on lookup errors."
   @spec guess_fqdn() :: charlist()
-  def guess_fqdn() do
+  def guess_fqdn do
     with {:ok, hostname} <- :inet.gethostname(),
          {:ok, hostent(h_name: fqdn)} <- :inet.gethostbyname(hostname) do
       fqdn
@@ -66,11 +67,13 @@ defmodule Postbeam.SMTP.Util do
   end
 
   @spec compute_cram_digest(binary(), binary()) :: binary()
+  @doc "Computes the hexadecimal HMAC-MD5 response for a CRAM challenge."
   def compute_cram_digest(key, data) do
     :crypto.mac(:hmac, :md5, key, data) |> Base.encode16(case: :lower)
   end
 
   @spec get_cram_string(charlist()) :: charlist()
+  @doc "Generates a base64 encoded CRAM-MD5 server challenge."
   def get_cram_string(hostname) do
     :erlang.binary_to_list(
       :base64.encode(
@@ -86,11 +89,14 @@ defmodule Postbeam.SMTP.Util do
   end
 
   @spec trim_crlf(charlist()) :: charlist()
+  @doc "Removes CR and LF bytes from a string."
   def trim_crlf(string) do
     :string.strip(:string.strip(string, :right, 10), :right, 13)
   end
 
-  def rfc5322_timestamp() do
+  @doc "Formats the current local time for an email Date header."
+  @spec rfc5322_timestamp() :: iolist()
+  def rfc5322_timestamp do
     {{year, month, day}, {hour, minute, second}} = :calendar.local_time()
     n_day = :calendar.day_of_the_week(year, month, day)
     do_w = :lists.nth(n_day, [~c"Mon", ~c"Tue", ~c"Wed", ~c"Thu", ~c"Fri", ~c"Sat", ~c"Sun"])
@@ -123,7 +129,9 @@ defmodule Postbeam.SMTP.Util do
     ])
   end
 
-  def zone() do
+  @doc "Formats the current local UTC offset."
+  @spec zone() :: binary()
+  def zone do
     time = :erlang.universaltime()
     local_time = :calendar.universal_time_to_local_time(time)
 
@@ -144,7 +152,9 @@ defmodule Postbeam.SMTP.Util do
     sign <> hours <> remainder
   end
 
-  def generate_message_id() do
+  @doc "Generates a unique Message-ID using the local hostname."
+  @spec generate_message_id() :: iolist()
+  def generate_message_id do
     fqdn = guess_FQDN()
 
     md5 =
@@ -155,7 +165,9 @@ defmodule Postbeam.SMTP.Util do
     :io_lib.format(~c"<~s@~s>", [md5, fqdn])
   end
 
-  def generate_message_boundary() do
+  @doc "Generates a unique MIME multipart boundary."
+  @spec generate_message_boundary() :: iolist()
+  def generate_message_boundary do
     fqdn = guess_FQDN()
 
     [
@@ -168,10 +180,14 @@ defmodule Postbeam.SMTP.Util do
     ]
   end
 
-  defp unique_id() do
+  @spec unique_id() :: {integer(), integer()}
+  defp unique_id do
     {:erlang.system_time(), :erlang.unique_integer()}
   end
 
+  @doc "Formats parsed mailboxes as a comma separated address header."
+  @spec combine_rfc822_addresses([{binary() | charlist() | :undefined, binary() | charlist()}]) ::
+          binary()
   def combine_rfc822_addresses([]) do
     <<>>
   end
@@ -180,6 +196,10 @@ defmodule Postbeam.SMTP.Util do
     :erlang.iolist_to_binary(combine_rfc822_addresses(addresses, []))
   end
 
+  @spec combine_rfc822_addresses(
+          [{binary() | charlist() | :undefined, binary() | charlist()}],
+          iolist()
+        ) :: iolist()
   defp combine_rfc822_addresses([], [32, 44 | acc]) do
     :lists.reverse(acc)
   end
@@ -201,6 +221,7 @@ defmodule Postbeam.SMTP.Util do
     combine_rfc822_addresses(rest, [32, 44, quoted | acc])
   end
 
+  @spec opt_quoted(binary() | charlist()) :: charlist()
   defp opt_quoted(b) when is_binary(b) do
     opt_quoted(:erlang.binary_to_list(b))
   end
@@ -215,7 +236,7 @@ defmodule Postbeam.SMTP.Util do
         s
       )
 
-    case :lists.any(&is_special/1, no_controls) do
+    case :lists.any(&special?/1, no_controls) do
       false ->
         no_controls
 
@@ -235,10 +256,12 @@ defmodule Postbeam.SMTP.Util do
     end
   end
 
-  defp is_special(char), do: char in [40, 41, 60, 62, 64, 44, 59, 58, 92, 34, 46, 91, 93, 39]
+  @spec special?(byte()) :: boolean()
+  defp special?(char), do: char in [40, 41, 60, 62, 64, 44, 59, 58, 92, 34, 46, 91, 93, 39]
 
   @spec parse_rfc5322_addresses(charlist() | binary()) ::
           {:ok, list(name_address())} | {:error, any()}
+  @doc false
   def parse_rfc5322_addresses(b) when is_binary(b) do
     case :unicode.characters_to_list(b) do
       chars when is_list(chars) -> parse_rfc5322_addresses(chars)
@@ -264,6 +287,7 @@ defmodule Postbeam.SMTP.Util do
 
   @spec parse_rfc822_addresses(charlist() | binary()) ::
           {:ok, list(name_address())} | {:error, any()}
+  @doc "Parses an RFC 822 address list into display names and mailboxes."
   def parse_rfc822_addresses(b) when is_binary(b) do
     case :unicode.characters_to_list(b) do
       chars when is_list(chars) -> parse_rfc822_addresses(chars)
@@ -276,6 +300,7 @@ defmodule Postbeam.SMTP.Util do
     :postbeam_smtp_rfc822_parse.parse(scanned)
   end
 
+  @spec scan_rfc822(charlist(), list()) :: list()
   defp scan_rfc822([], acc) do
     acc
   end
@@ -305,6 +330,7 @@ defmodule Postbeam.SMTP.Util do
     end
   end
 
+  @spec scan_rfc822_scan_endpointybracket(charlist()) :: {charlist(), charlist()}
   defp scan_rfc822_scan_endpointybracket(string) do
     case :re.run(string, ~c"(.*?)>(.*)", [{:capture, :all_but_first, :list}]) do
       {:match, [token, rest]} -> {token, rest}
@@ -312,6 +338,7 @@ defmodule Postbeam.SMTP.Util do
     end
   end
 
+  @spec scan_rfc822_scan_endquote(charlist(), charlist(), boolean()) :: {charlist(), charlist()}
   defp scan_rfc822_scan_endquote([92 | r], acc, in_escape) do
     scan_rfc822_scan_endquote(r, acc, not in_escape)
   end

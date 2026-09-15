@@ -1,7 +1,3 @@
-# Preserve the imported SMTP callback API and protocol branch structure.
-# credo:disable-for-this-file Credo.Check.Readability.PredicateFunctionNames
-# credo:disable-for-this-file Credo.Check.Refactor.CyclomaticComplexity
-# credo:disable-for-this-file Credo.Check.Refactor.Nesting
 # Copyright 2009 Andrew Thompson <andrew@hijacked.us>. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -37,6 +33,14 @@ defmodule Postbeam.SMTP.MIME do
   Without it, default decoding preserves header and body encodings. Use
   `encoding: :raw` to request this behavior explicitly.
   """
+
+  alias Postbeam.SMTP.Binary
+  alias Postbeam.SMTP.DKIM
+  alias Postbeam.SMTP.MIME.EncodedWord
+  alias Postbeam.SMTP.MIME.Parameters
+  alias Postbeam.SMTP.MIME.TransferEncoding
+  alias Postbeam.SMTP.Util
+
   if Mix.env() == :test do
     @compile [:export_all, :nowarn_export_all]
   end
@@ -74,6 +78,7 @@ defmodule Postbeam.SMTP.MIME do
             | {:default_mime_version, binary()}
           )
   @spec decode(binary()) :: mimetuple()
+  @doc "Decodes a MIME message into its headers, parameters and body parts."
   def decode(all) do
     {headers, body} = parse_headers(all)
 
@@ -86,72 +91,83 @@ defmodule Postbeam.SMTP.MIME do
   end
 
   @spec decode(binary(), options()) :: mimetuple()
+  @doc "Decodes a MIME message into its headers, parameters and body parts."
   def decode(all, options) when is_binary(all) and is_list(options) do
     {headers, body} = parse_headers(all)
     decode(headers, body, options)
   end
 
+  @spec decode(headers(), binary(), options()) :: mimetuple()
   defp decode(orig_headers, body, options) do
-    Postbeam.SMTP.Log.debug(~c"headers: ~p", [orig_headers], %{domain: [:postbeam]})
     encoding = :proplists.get_value(:encoding, options, :none)
     headers = decode_headers(orig_headers, [], encoding)
 
     case parse_with_comments(get_header_value("MIME-Version", headers)) do
       :undefined ->
-        allow_missing_version = :proplists.get_value(:allow_missing_version, options, false)
-
-        case parse_content_type(get_header_value("Content-Type", headers)) do
-          {"multipart", _sub_type, _parameters} when allow_missing_version ->
-            mime_version = :proplists.get_value(:default_mime_version, options, "1.0")
-            decode_component(headers, body, mime_version, options)
-
-          {"multipart", _sub_type, _parameters} ->
-            :erlang.error(:non_mime_multipart)
-
-          {type, sub_type, content_type_parameters} ->
-            new_body =
-              decode_body(
-                get_header_value("Content-Transfer-Encoding", headers),
-                body,
-                :proplists.get_value("charset", content_type_parameters),
-                encoding
-              )
-
-            {disposition, disposition_params} =
-              case parse_content_disposition(get_header_value("Content-Disposition", headers)) do
-                :undefined -> {"inline", []}
-                disp -> disp
-              end
-
-            parameters = %{
-              content_type_params: content_type_parameters,
-              disposition: disposition,
-              disposition_params: disposition_params
-            }
-
-            {type, sub_type, headers, parameters, new_body}
-
-          :undefined ->
-            parameters = %{
-              content_type_params: [{"charset", "us-ascii"}],
-              disposition: "inline",
-              disposition_params: []
-            }
-
-            {"text", "plain", headers, parameters,
-             decode_body(get_header_value("Content-Transfer-Encoding", headers), body)}
-        end
+        decode_unversioned(headers, body, options)
 
       other ->
         decode_component(headers, body, other, options)
     end
   end
 
+  @spec decode_unversioned(headers(), binary(), options()) :: mimetuple()
+  defp decode_unversioned(headers, body, options) do
+    encoding = :proplists.get_value(:encoding, options, :none)
+    allow_missing_version = :proplists.get_value(:allow_missing_version, options, false)
+    content_type = parse_content_type(get_header_value("Content-Type", headers))
+
+    case content_type do
+      {"multipart", _sub_type, _parameters} when allow_missing_version ->
+        mime_version = :proplists.get_value(:default_mime_version, options, "1.0")
+        decode_component(headers, body, mime_version, options)
+
+      {"multipart", _sub_type, _parameters} ->
+        :erlang.error(:non_mime_multipart)
+
+      {type, sub_type, content_type_parameters} ->
+        new_body =
+          decode_body(
+            get_header_value("Content-Transfer-Encoding", headers),
+            body,
+            :proplists.get_value("charset", content_type_parameters),
+            encoding
+          )
+
+        {disposition, disposition_params} =
+          case parse_content_disposition(get_header_value("Content-Disposition", headers)) do
+            :undefined -> {"inline", []}
+            disp -> disp
+          end
+
+        parameters = %{
+          content_type_params: content_type_parameters,
+          disposition: disposition,
+          disposition_params: disposition_params
+        }
+
+        {type, sub_type, headers, parameters, new_body}
+
+      :undefined ->
+        parameters = %{
+          content_type_params: [{"charset", "us-ascii"}],
+          disposition: "inline",
+          disposition_params: []
+        }
+
+        {"text", "plain", headers, parameters,
+         decode_body(get_header_value("Content-Transfer-Encoding", headers), body)}
+    end
+  end
+
   @spec encode(mimetuple()) :: binary()
+  @doc "Encodes a MIME tuple, adding required headers and optional DKIM signatures."
   def encode(mime_mail) do
     encode(mime_mail, [])
   end
 
+  @doc "Encodes a MIME tuple, adding required headers and optional DKIM signatures."
+  @spec encode(mimetuple(), options()) :: binary()
   def encode({type, subtype, headers, content_type_params, parts}, options) do
     {fixed_params, fixed_headers} =
       ensure_content_headers(type, subtype, content_type_params, headers, parts, true)
@@ -159,7 +175,7 @@ defmodule Postbeam.SMTP.MIME do
     checked_headers = check_headers(fixed_headers)
 
     encoded_body =
-      Postbeam.SMTP.Binary.join(
+      Binary.join(
         encode_component(type, subtype, checked_headers, fixed_params, parts),
         ~c"\r\n"
       )
@@ -169,21 +185,21 @@ defmodule Postbeam.SMTP.MIME do
     signed_headers =
       case :proplists.get_value(:dkim, options) do
         :undefined -> encoded_headers
-        dkim_options -> Postbeam.SMTP.DKIM.sign(encoded_headers, encoded_body, dkim_options)
+        dkim_options -> DKIM.sign(encoded_headers, encoded_body, dkim_options)
       end
 
     :erlang.list_to_binary([
-      Postbeam.SMTP.Binary.join(signed_headers, ~c"\r\n"),
+      Binary.join(signed_headers, ~c"\r\n"),
       ~c"\r\n\r\n",
       encoded_body
     ])
   end
 
   def encode(_, _) do
-    Postbeam.SMTP.Log.debug(~c"Not a mime-decoded DATA", %{domain: [:postbeam]})
     :erlang.error(:non_mime)
   end
 
+  @spec decode_headers(headers(), headers(), binary() | :none | :raw) :: headers()
   defp decode_headers(headers, _, encoding) when encoding in [:none, :raw] do
     headers
   end
@@ -196,6 +212,7 @@ defmodule Postbeam.SMTP.MIME do
     decode_headers(headers, [{key, decode_header(value, charset)} | acc], charset)
   end
 
+  @spec decode_header(binary(), binary()) :: binary()
   defp decode_header(value, charset) do
     r_tokens = tokenize_header(value, [])
     tokens = :lists.reverse(r_tokens)
@@ -234,22 +251,27 @@ defmodule Postbeam.SMTP.MIME do
          {type_start, _},
          {data_start, data_len}
        ]} ->
-        encoding = Postbeam.SMTP.Binary.substr(value, encoding_start + 1, encoding_len)
+        encoding = Binary.substr(value, encoding_start + 1, encoding_len)
 
         type =
-          Postbeam.SMTP.Binary.to_lower(Postbeam.SMTP.Binary.substr(value, type_start + 1, 1))
+          Binary.to_lower(Binary.substr(value, type_start + 1, 1))
 
-        data = Postbeam.SMTP.Binary.substr(value, data_start + 1, data_len)
+        data = Binary.substr(value, data_start + 1, data_len)
 
         encoded_data =
           case type do
-            "q" -> decode_quoted_printable(:binary.replace(data, "_", "=20", [:global]))
-            "b" -> decode_base64(:binary.replace(data, "_", " ", [:global]))
+            "q" ->
+              TransferEncoding.decode_quoted_printable(
+                :binary.replace(data, "_", "=20", [:global])
+              )
+
+            "b" ->
+              TransferEncoding.decode_base64(:binary.replace(data, "_", " ", [:global]))
           end
 
         offset =
           case :re.run(
-                 Postbeam.SMTP.Binary.substr(value, all_start + all_len + 1),
+                 Binary.substr(value, all_start + all_len + 1),
                  ~c"^([ \t\n\r]+)=\\?[-A-Za-z0-9_]+\\?[^ ]\\?[^ ]+\\?=",
                  [:ungreedy]
                ) do
@@ -258,15 +280,16 @@ defmodule Postbeam.SMTP.MIME do
           end
 
         new_acc =
-          case Postbeam.SMTP.Binary.substr(value, 1, all_start) do
+          case Binary.substr(value, 1, all_start) do
             <<>> -> [{fix_encoding(encoding), encoded_data} | acc]
             other -> [{fix_encoding(encoding), encoded_data}, other | acc]
           end
 
-        tokenize_header(Postbeam.SMTP.Binary.substr(value, all_start + all_len + offset), new_acc)
+        tokenize_header(Binary.substr(value, all_start + all_len + offset), new_acc)
     end
   end
 
+  @spec decode_header_tokens_strict([hdr_token()], binary()) :: iodata()
   defp decode_header_tokens_strict([], _) do
     []
   end
@@ -280,6 +303,8 @@ defmodule Postbeam.SMTP.MIME do
     [data | decode_header_tokens_strict(tokens, charset)]
   end
 
+  @spec decode_header_tokens_permissive([hdr_token()], binary(), [hdr_token()]) ::
+          {:ok, iodata()} | :error
   defp decode_header_tokens_permissive([], _, [result]) when is_binary(result) do
     {:ok, result}
   end
@@ -306,6 +331,7 @@ defmodule Postbeam.SMTP.MIME do
     decode_header_tokens_permissive(tokens, charset, [data | stack])
   end
 
+  @spec convert(binary(), binary() | :undefined, binary()) :: {:ok, binary()}
   defp convert(_to, "x-binaryenc", data) do
     {:ok, data}
   end
@@ -315,6 +341,7 @@ defmodule Postbeam.SMTP.MIME do
     {:ok, result}
   end
 
+  @spec decode_component(headers(), binary(), binary() | :undefined, options()) :: mimetuple()
   defp decode_component(headers, body, <<"1.0", _::binary>> = mime_vsn, options) do
     {disposition, disposition_params} =
       case parse_content_disposition(get_header_value("Content-Disposition", headers)) do
@@ -329,12 +356,6 @@ defmodule Postbeam.SMTP.MIME do
             :erlang.error(:no_boundary)
 
           boundary ->
-            Postbeam.SMTP.Log.debug(
-              ~c"this is a multipart email of type:  ~s and boundary ~s",
-              [sub_type, boundary],
-              %{domain: [:postbeam]}
-            )
-
             parameters2 = %{
               content_type_params: parameters,
               disposition: disposition,
@@ -362,8 +383,6 @@ defmodule Postbeam.SMTP.MIME do
         {"message", "rfc822", headers, parameters2, decode(new_headers, new_body, options)}
 
       {type, sub_type, parameters} ->
-        Postbeam.SMTP.Log.debug(~c"body is ~s/~s", [type, sub_type], %{domain: [:postbeam]})
-
         parameters2 = %{
           content_type_params: parameters,
           disposition: disposition,
@@ -398,10 +417,10 @@ defmodule Postbeam.SMTP.MIME do
   end
 
   @spec get_header_value(binary(), list({binary(), binary()}), any()) :: binary() | any()
+  @doc "Looks up a header by name, ignoring ASCII case."
   def get_header_value(needle, headers, default) do
-    Postbeam.SMTP.Log.debug(~c"Headers: ~p", [headers], %{domain: [:postbeam]})
-    needle_lower = Postbeam.SMTP.Binary.to_lower(needle)
-    f = fn {header, _value} -> Postbeam.SMTP.Binary.to_lower(header) === needle_lower end
+    needle_lower = Binary.to_lower(needle)
+    f = fn {header, _value} -> Binary.to_lower(header) === needle_lower end
 
     case :lists.search(f, headers) do
       {:value, {_header, value}} -> value
@@ -410,6 +429,7 @@ defmodule Postbeam.SMTP.MIME do
   end
 
   @spec get_header_value(binary(), list({binary(), binary()})) :: binary() | :undefined
+  @doc "Looks up a header by name, ignoring ASCII case."
   def get_header_value(needle, headers) do
     get_header_value(needle, headers, :undefined)
   end
@@ -435,7 +455,7 @@ defmodule Postbeam.SMTP.MIME do
   end
 
   defp parse_with_comments(<<>>, acc, _depth, _quotes) do
-    Postbeam.SMTP.Binary.strip(:erlang.list_to_binary(:lists.reverse(acc)))
+    Binary.strip(:erlang.list_to_binary(:lists.reverse(acc)))
   end
 
   defp parse_with_comments(<<92, h, tail::binary>>, acc, depth, quotes)
@@ -487,24 +507,21 @@ defmodule Postbeam.SMTP.MIME do
   end
 
   defp parse_content_type(string) do
-    try do
-      parse_content_disposition(string)
-    catch
-      :throw, :bad_disposition -> throw(:bad_content_type)
-    else
-      {raw_type, parameters} ->
-        case Postbeam.SMTP.Binary.strchr(raw_type, 47) do
-          index when index < 2 ->
-            throw(:bad_content_type)
+    parse_content_disposition(string)
+  catch
+    :throw, :bad_disposition -> throw(:bad_content_type)
+  else
+    {raw_type, parameters} ->
+      case Binary.strchr(raw_type, 47) do
+        index when index < 2 ->
+          throw(:bad_content_type)
 
-          index ->
-            type = Postbeam.SMTP.Binary.substr(raw_type, 1, index - 1)
-            sub_type = Postbeam.SMTP.Binary.substr(raw_type, index + 1)
+        index ->
+          type = Binary.substr(raw_type, 1, index - 1)
+          sub_type = Binary.substr(raw_type, index + 1)
 
-            {Postbeam.SMTP.Binary.to_lower(type), Postbeam.SMTP.Binary.to_lower(sub_type),
-             parameters}
-        end
-    end
+          {Binary.to_lower(type), Binary.to_lower(sub_type), parameters}
+      end
   end
 
   @spec parse_content_disposition(:undefined) :: :undefined
@@ -514,29 +531,30 @@ defmodule Postbeam.SMTP.MIME do
   end
 
   defp parse_content_disposition(string) do
-    [disposition | parameters] = Postbeam.SMTP.Binary.split(parse_with_comments(string), ";")
+    [disposition | parameters] = Binary.split(parse_with_comments(string), ";")
 
     f = fn x ->
-      y = Postbeam.SMTP.Binary.strip(Postbeam.SMTP.Binary.strip(x), :both, 9)
+      y = Binary.strip(Binary.strip(x), :both, 9)
 
-      case Postbeam.SMTP.Binary.strchr(y, 61) do
+      case Binary.strchr(y, 61) do
         index when index < 2 ->
           throw(:bad_disposition)
 
         index ->
-          key = Postbeam.SMTP.Binary.substr(y, 1, index - 1)
-          value = Postbeam.SMTP.Binary.substr(y, index + 1)
-          {Postbeam.SMTP.Binary.to_lower(key), value}
+          key = Binary.substr(y, 1, index - 1)
+          value = Binary.substr(y, index + 1)
+          {Binary.to_lower(key), value}
       end
     end
 
     params = :lists.map(f, parameters)
-    {Postbeam.SMTP.Binary.to_lower(disposition), params}
+    {Binary.to_lower(disposition), params}
   end
 
+  @spec split_body_by_boundary(binary(), binary(), binary(), options()) :: [mimetuple()]
   defp split_body_by_boundary(body, boundary, mime_vsn, options) do
-    case {Postbeam.SMTP.Binary.strpos(body, boundary),
-          Postbeam.SMTP.Binary.strpos(body, :erlang.list_to_binary([boundary, ~c"--"]))} do
+    case {Binary.strpos(body, boundary),
+          Binary.strpos(body, :erlang.list_to_binary([boundary, ~c"--"]))} do
       {0, _} ->
         :erlang.error(:missing_boundary)
 
@@ -544,7 +562,7 @@ defmodule Postbeam.SMTP.MIME do
         :erlang.error(:missing_last_boundary)
 
       {start, var_end} ->
-        new_body = Postbeam.SMTP.Binary.substr(body, start + byte_size(boundary), var_end - start)
+        new_body = Binary.substr(body, start + byte_size(boundary), var_end - start)
 
         parts =
           split_body_by_boundary_(
@@ -554,34 +572,36 @@ defmodule Postbeam.SMTP.MIME do
             options
           )
 
-        for {headers, body2} <-
-              for({_, body3} = v <- parts, byte_size(body3) !== 0, into: [], do: v),
-            into: [],
-            do: decode_component(headers, body2, mime_vsn, options)
+        for {headers, body} <- parts,
+            body != "",
+            do: decode_component(headers, body, mime_vsn, options)
     end
   end
 
+  @spec split_body_by_boundary_(binary(), binary(), [{headers(), binary()}], options()) :: [
+          {headers(), binary()}
+        ]
   defp split_body_by_boundary_(<<>>, _boundary, acc, _options) do
     :lists.reverse(acc)
   end
 
   defp split_body_by_boundary_(body, boundary, acc, options) do
     trimmed_body =
-      Postbeam.SMTP.Binary.substr(body, Postbeam.SMTP.Binary.strpos(body, ~c"\r\n") + 2)
+      Binary.substr(body, Binary.strpos(body, ~c"\r\n") + 2)
 
-    case Postbeam.SMTP.Binary.strpos(trimmed_body, boundary) do
+    case Binary.strpos(trimmed_body, boundary) do
       0 ->
         :lists.reverse([{[], trimmed_body} | acc])
 
       index ->
         {parsed_hdrs, body_rest} =
-          parse_headers(Postbeam.SMTP.Binary.substr(trimmed_body, 1, index - 1))
+          parse_headers(Binary.substr(trimmed_body, 1, index - 1))
 
         decoded_hdrs =
           decode_headers(parsed_hdrs, [], :proplists.get_value(:encoding, options, :none))
 
         split_body_by_boundary_(
-          Postbeam.SMTP.Binary.substr(trimmed_body, index + byte_size(boundary)),
+          Binary.substr(trimmed_body, index + byte_size(boundary)),
           boundary,
           [{decoded_hdrs, body_rest} | acc],
           options
@@ -590,98 +610,73 @@ defmodule Postbeam.SMTP.MIME do
   end
 
   @spec parse_headers(binary()) :: {list({binary(), binary()}), binary()}
+  @doc false
   def parse_headers(body) do
-    case Postbeam.SMTP.Binary.strpos(body, ~c"\r\n") do
+    case Binary.strpos(body, ~c"\r\n") do
       0 ->
         {[], body}
 
       1 ->
-        {[], Postbeam.SMTP.Binary.substr(body, 3)}
+        {[], Binary.substr(body, 3)}
 
       index ->
         parse_headers(
-          Postbeam.SMTP.Binary.substr(body, index + 2),
-          Postbeam.SMTP.Binary.substr(body, 1, index - 1),
+          Binary.substr(body, index + 2),
+          Binary.substr(body, 1, index - 1),
           []
         )
     end
   end
 
+  @spec parse_headers(binary(), binary(), headers()) :: {headers(), binary()}
   defp parse_headers(body, <<h, tail::binary>>, []) when h === 32 or h === 9 do
     {[], :erlang.list_to_binary([h, tail, ~c"\r\n", body])}
   end
 
-  defp parse_headers(body, <<h, t::binary>>, headers) when h === 32 or h === 9 do
-    [{field_name, old_field_value} | other_headers] = headers
-    field_value = :erlang.list_to_binary([old_field_value, t])
-    Postbeam.SMTP.Log.debug(~c"~p = ~p", [field_name, field_value], %{domain: [:postbeam]})
-
-    case Postbeam.SMTP.Binary.strpos(body, ~c"\r\n") do
-      0 ->
-        {:lists.reverse([{field_name, field_value} | other_headers]), body}
-
-      1 ->
-        {:lists.reverse([{field_name, field_value} | other_headers]),
-         Postbeam.SMTP.Binary.substr(body, 3)}
-
-      index2 ->
-        parse_headers(
-          Postbeam.SMTP.Binary.substr(body, index2 + 2),
-          Postbeam.SMTP.Binary.substr(body, 1, index2 - 1),
-          [{field_name, field_value} | other_headers]
-        )
-    end
+  defp parse_headers(body, <<h, tail::binary>>, [{name, value} | headers]) when h in [?\s, ?\t] do
+    continue_headers(body, [{name, value <> tail} | headers])
   end
 
   defp parse_headers(body, line, headers) do
-    Postbeam.SMTP.Log.debug(~c"line: ~p", [line], %{domain: [:postbeam]})
-
-    case Postbeam.SMTP.Binary.strchr(line, 58) do
-      0 ->
-        {:lists.reverse(headers), :erlang.list_to_binary([line, ~c"\r\n", body])}
-
-      index ->
-        field_name = Postbeam.SMTP.Binary.substr(line, 1, index - 1)
-        f = fn x -> x > 32 and x < 127 end
-
-        case Postbeam.SMTP.Binary.all(f, field_name) do
-          true ->
-            f2 = fn x -> (x > 31 and x < 127) or x == 9 end
-            f_value = Postbeam.SMTP.Binary.strip(Postbeam.SMTP.Binary.substr(line, index + 1))
-
-            field_value =
-              case Postbeam.SMTP.Binary.all(f2, f_value) do
-                true ->
-                  f_value
-
-                _ ->
-                  :erlang.list_to_binary(
-                    for <<c::8 <- f_value>>, into: [], do: filter_non_ascii(c)
-                  )
-              end
-
-            case Postbeam.SMTP.Binary.strpos(body, ~c"\r\n") do
-              0 ->
-                {:lists.reverse([{field_name, field_value} | headers]), body}
-
-              1 ->
-                {:lists.reverse([{field_name, field_value} | headers]),
-                 Postbeam.SMTP.Binary.substr(body, 3)}
-
-              index2 ->
-                parse_headers(
-                  Postbeam.SMTP.Binary.substr(body, index2 + 2),
-                  Postbeam.SMTP.Binary.substr(body, 1, index2 - 1),
-                  [{field_name, field_value} | headers]
-                )
-            end
-
-          false ->
-            {:lists.reverse(headers), :erlang.list_to_binary([line, ~c"\r\n", body])}
+    case :binary.split(line, ":") do
+      [name, value] ->
+        if Binary.all(&(&1 > 32 and &1 < 127), name) do
+          continue_headers(body, [{name, clean_header_value(value)} | headers])
+        else
+          {Enum.reverse(headers), line <> "\r\n" <> body}
         end
+
+      [_line] ->
+        {Enum.reverse(headers), line <> "\r\n" <> body}
     end
   end
 
+  @spec continue_headers(binary(), headers()) :: {headers(), binary()}
+  defp continue_headers(body, headers) do
+    case Binary.strpos(body, "\r\n") do
+      0 ->
+        {Enum.reverse(headers), body}
+
+      1 ->
+        {Enum.reverse(headers), Binary.substr(body, 3)}
+
+      index ->
+        parse_headers(Binary.substr(body, index + 2), Binary.substr(body, 1, index - 1), headers)
+    end
+  end
+
+  @spec clean_header_value(binary()) :: binary()
+  defp clean_header_value(value) do
+    value = Binary.strip(value)
+
+    if Binary.all(&(&1 in 32..126 or &1 == ?\t), value) do
+      value
+    else
+      for <<c <- value>>, into: <<>>, do: filter_non_ascii(c)
+    end
+  end
+
+  @spec filter_non_ascii(byte()) :: binary()
   defp filter_non_ascii(c) when (c > 31 and c < 127) or c == 9 do
     <<c>>
   end
@@ -690,6 +685,12 @@ defmodule Postbeam.SMTP.MIME do
     "?"
   end
 
+  @spec decode_body(
+          binary() | :undefined,
+          binary(),
+          binary() | :undefined,
+          binary() | :raw | :none
+        ) :: binary()
   defp decode_body(type, body, _in_encoding, :raw), do: decode_body(type, body)
 
   defp decode_body(type, body, _in_encoding, :none) do
@@ -717,126 +718,66 @@ defmodule Postbeam.SMTP.MIME do
   end
 
   defp decode_body(type, body) do
-    case Postbeam.SMTP.Binary.to_lower(type) do
-      "quoted-printable" -> decode_quoted_printable(body)
-      "base64" -> decode_base64(body)
+    case Binary.to_lower(type) do
+      "quoted-printable" -> TransferEncoding.decode_quoted_printable(body)
+      "base64" -> TransferEncoding.decode_base64(body)
       _other -> body
     end
   end
 
-  defp decode_base64(body) do
-    :base64.mime_decode(body)
-  end
-
-  def decode_quoted_printable(body) do
-    decode_quoted_printable(body, false, <<>>, <<>>)
-  end
-
-  defp decode_quoted_printable(<<>>, _has_soft_eol, _w_s_ps, acc) do
-    acc
-  end
-
-  defp decode_quoted_printable(<<13, 10, more::binary>>, true, _w_s_ps, acc) do
-    decode_quoted_printable(more, false, <<>>, acc)
-  end
-
-  defp decode_quoted_printable(<<c, more::binary>>, true, _w_s_ps, acc)
-       when c === 32 or c === 9 do
-    decode_quoted_printable(more, true, <<>>, acc)
-  end
-
-  defp decode_quoted_printable(_body, true, _w_s_ps, _acc) do
-    throw(:badchar)
-  end
-
-  defp decode_quoted_printable(<<13, 10, more::binary>>, false, _w_s_ps, acc) do
-    decode_quoted_printable(more, false, <<>>, <<acc::binary, 13, 10>>)
-  end
-
-  defp decode_quoted_printable(<<c, more::binary>>, false, w_s_ps, acc)
-       when c === 32 or c === 9 do
-    decode_quoted_printable(more, false, <<w_s_ps::binary, c>>, acc)
-  end
-
-  defp decode_quoted_printable(<<61, c1, c2, more::binary>>, false, w_s_ps, acc)
-       when ((c1 >= 48 and c1 <= 57) or ((c1 >= 65 and c1 <= 70) or (c1 >= 97 and c1 <= 102))) and
-              ((c2 >= 48 and c2 <= 57) or ((c2 >= 65 and c2 <= 70) or (c2 >= 97 and c2 <= 102))) do
-    decode_quoted_printable(
-      more,
-      false,
-      <<>>,
-      <<acc::binary, w_s_ps::binary, unhex(c1)::4, unhex(c2)::4>>
-    )
-  end
-
-  defp decode_quoted_printable(<<61, more::binary>>, false, w_s_ps, acc) do
-    decode_quoted_printable(more, true, <<>>, <<acc::binary, w_s_ps::binary>>)
-  end
-
-  defp decode_quoted_printable(<<c, more::binary>>, false, w_s_ps, acc) do
-    decode_quoted_printable(more, false, <<>>, <<acc::binary, w_s_ps::binary, c>>)
-  end
-
+  @spec check_headers(headers()) :: headers()
   defp check_headers(headers) do
     checked = ["MIME-Version", "Date", "From", "Message-ID", "References", "Subject"]
     check_headers(checked, :lists.reverse(headers))
   end
 
+  @spec check_headers([binary()], headers()) :: headers()
   defp check_headers([], headers) do
     :lists.reverse(headers)
   end
 
   defp check_headers([header | tail], headers) do
-    case get_header_value(header, headers) do
-      :undefined when header == "MIME-Version" ->
-        check_headers(tail, [{"MIME-Version", "1.0"} | headers])
+    headers = ensure_header(header, get_header_value(header, headers), headers)
+    check_headers(tail, headers)
+  end
 
-      :undefined when header == "Date" ->
-        check_headers(tail, [
-          {"Date", :erlang.list_to_binary(Postbeam.SMTP.Util.rfc5322_timestamp())} | headers
-        ])
+  @spec ensure_header(binary(), binary() | :undefined, headers()) :: headers()
+  defp ensure_header("MIME-Version", :undefined, headers), do: [{"MIME-Version", "1.0"} | headers]
 
-      :undefined when header == "From" ->
-        :erlang.error(:missing_from)
+  defp ensure_header("Date", :undefined, headers),
+    do: [{"Date", IO.iodata_to_binary(Util.rfc5322_timestamp())} | headers]
 
-      :undefined when header == "Message-ID" ->
-        check_headers(tail, [
-          {"Message-ID", :erlang.list_to_binary(Postbeam.SMTP.Util.generate_message_id())}
-          | headers
-        ])
+  defp ensure_header("From", :undefined, _headers), do: :erlang.error(:missing_from)
 
-      :undefined when header == "References" ->
-        case get_header_value("In-Reply-To", headers) do
-          :undefined -> check_headers(tail, headers)
-          reply_id -> check_headers(tail, [{"References", reply_id} | headers])
-        end
+  defp ensure_header("Message-ID", :undefined, headers),
+    do: [{"Message-ID", IO.iodata_to_binary(Util.generate_message_id())} | headers]
 
-      references when header == "References" ->
-        case get_header_value("In-Reply-To", headers) do
-          :undefined ->
-            check_headers(tail, headers)
+  defp ensure_header("References", references, headers) do
+    ensure_references(references, get_header_value("In-Reply-To", headers), headers)
+  end
 
-          reply_id ->
-            case Postbeam.SMTP.Binary.strpos(
-                   Postbeam.SMTP.Binary.to_lower(references),
-                   Postbeam.SMTP.Binary.to_lower(reply_id)
-                 ) do
-              0 ->
-                check_headers(tail, [
-                  {"References", :erlang.list_to_binary([references, ~c" ", reply_id])}
-                  | :proplists.delete("References", headers)
-                ])
+  defp ensure_header(_name, _value, headers), do: headers
 
-              _index ->
-                check_headers(tail, headers)
-            end
-        end
+  @spec ensure_references(binary() | :undefined, binary() | :undefined, headers()) :: headers()
+  defp ensure_references(_references, :undefined, headers), do: headers
+  defp ensure_references(:undefined, reply_id, headers), do: [{"References", reply_id} | headers]
 
-      _ ->
-        check_headers(tail, headers)
+  defp ensure_references(references, reply_id, headers) do
+    if Binary.strpos(Binary.to_lower(references), Binary.to_lower(reply_id)) == 0 do
+      [{"References", references <> " " <> reply_id} | :proplists.delete("References", headers)]
+    else
+      headers
     end
   end
 
+  @spec ensure_content_headers(
+          binary(),
+          binary(),
+          parameters(),
+          headers(),
+          binary() | mimetuple() | [mimetuple()],
+          boolean()
+        ) :: {parameters(), headers()}
   defp ensure_content_headers(type, sub_type, parameters, headers, body, toplevel) do
     check_headers = ["Content-Type", "Content-Disposition", "Content-Transfer-Encoding"]
 
@@ -854,6 +795,15 @@ defmodule Postbeam.SMTP.MIME do
     )
   end
 
+  @spec ensure_content_headers(
+          [{binary(), binary() | :undefined}],
+          binary(),
+          binary(),
+          parameters(),
+          headers(),
+          binary() | mimetuple() | [mimetuple()],
+          boolean()
+        ) :: {parameters(), headers()}
   defp ensure_content_headers([], _, _, parameters, headers, _, _) do
     {parameters, :lists.reverse(headers)}
   end
@@ -870,37 +820,14 @@ defmodule Postbeam.SMTP.MIME do
        when (type == "text" and sub_type !== "plain") or type !== "text" do
     c_t = :io_lib.format(~c"~s/~s", [type, sub_type])
 
-    c_tp =
-      case type do
-        "multipart" ->
-          boundary =
-            case :proplists.get_value("boundary", :maps.get(:content_type_params, parameters, [])) do
-              :undefined -> :erlang.list_to_binary(Postbeam.SMTP.Util.generate_message_boundary())
-              b -> b
-            end
+    c_tp = content_type_parameters(type, parameters, body)
 
-          [
-            {"boundary", boundary}
-            | :proplists.delete("boundary", :maps.get(:content_type_params, parameters, []))
-          ]
+    c_th =
+      Binary.join(
+        [c_t | Parameters.encode_parameters(c_tp)],
+        ~c";"
+      )
 
-        "text" ->
-          charset =
-            case :proplists.get_value("charset", :maps.get(:content_type_params, parameters, [])) do
-              :undefined -> guess_charset(body)
-              c -> c
-            end
-
-          [
-            {"charset", charset}
-            | :proplists.delete("charset", :maps.get(:content_type_params, parameters, []))
-          ]
-
-        _ ->
-          :maps.get(:content_type_params, parameters, [])
-      end
-
-    c_th = Postbeam.SMTP.Binary.join([c_t | encode_parameters(c_tp)], ~c";")
     new_parameters = Map.merge(parameters, %{content_type_params: c_tp})
 
     ensure_content_headers(
@@ -926,7 +853,7 @@ defmodule Postbeam.SMTP.MIME do
     charset =
       case :proplists.get_value("charset", :maps.get(:content_type_params, parameters, [])) do
         :undefined -> guess_charset(body)
-        c -> Postbeam.SMTP.Binary.to_lower(c)
+        c -> Binary.to_lower(c)
       end
 
     case charset do
@@ -939,7 +866,12 @@ defmodule Postbeam.SMTP.MIME do
           | :proplists.delete("charset", :maps.get(:content_type_params, parameters, []))
         ]
 
-        c_th = Postbeam.SMTP.Binary.join(["text/plain" | encode_parameters(c_tp)], ~c";")
+        c_th =
+          Binary.join(
+            ["text/plain" | Parameters.encode_parameters(c_tp)],
+            ~c";"
+          )
+
         new_parameters = Map.merge(parameters, %{content_type_params: c_tp})
 
         ensure_content_headers(
@@ -998,7 +930,12 @@ defmodule Postbeam.SMTP.MIME do
        ) do
     c_d = :maps.get(:disposition, parameters, "inline")
     c_dp = :maps.get(:disposition_params, parameters, [])
-    c_dh = Postbeam.SMTP.Binary.join([c_d | encode_parameters(c_dp)], ~c";")
+
+    c_dh =
+      Binary.join(
+        [c_d | Parameters.encode_parameters(c_dp)],
+        ~c";"
+      )
 
     ensure_content_headers(
       tail,
@@ -1015,48 +952,87 @@ defmodule Postbeam.SMTP.MIME do
     ensure_content_headers(tail, type, sub_type, parameters, headers, body, toplevel)
   end
 
+  @spec content_type_parameters(binary(), parameters(), binary() | list()) :: headers()
+  defp content_type_parameters(type, parameters, body) do
+    case type do
+      "multipart" ->
+        boundary =
+          case :proplists.get_value("boundary", :maps.get(:content_type_params, parameters, [])) do
+            :undefined -> :erlang.list_to_binary(Util.generate_message_boundary())
+            b -> b
+          end
+
+        [
+          {"boundary", boundary}
+          | :proplists.delete("boundary", :maps.get(:content_type_params, parameters, []))
+        ]
+
+      "text" ->
+        charset =
+          case :proplists.get_value("charset", :maps.get(:content_type_params, parameters, [])) do
+            :undefined -> guess_charset(body)
+            c -> c
+          end
+
+        [
+          {"charset", charset}
+          | :proplists.delete("charset", :maps.get(:content_type_params, parameters, []))
+        ]
+
+      _ ->
+        :maps.get(:content_type_params, parameters, [])
+    end
+  end
+
+  @spec guess_charset(binary()) :: binary()
   defp guess_charset(body) do
-    case Postbeam.SMTP.Binary.all(fn x -> x < 128 end, body) do
+    case Binary.all(fn x -> x < 128 end, body) do
       true -> "us-ascii"
       false -> "utf-8"
     end
   end
 
+  @spec guess_best_encoding(binary()) :: binary()
   defp guess_best_encoding(body) do
-    case valid_7bit(body) do
+    case valid_7bit?(body) do
       true -> "7bit"
       false -> choose_transformation(body)
     end
   end
 
+  @spec choose_transformation(binary()) :: binary()
   defp choose_transformation(<<chunk::size(200)-binary, _, _::binary>>) do
     choose_transformation(chunk)
   end
 
   defp choose_transformation(body) do
     {readable, encoded} =
-      partition_count_bytes(fn c -> (c >= 32 and c <= 126) or (c === 13 or c === 10) end, body)
+      Binary.partition_count_bytes(
+        fn c -> (c >= 32 and c <= 126) or (c === 13 or c === 10) end,
+        body
+      )
 
     if readable >= 4 * encoded, do: "quoted-printable", else: "base64"
   end
 
-  defp valid_7bit("\n") do
+  @spec valid_7bit?(binary()) :: boolean()
+  defp valid_7bit?("\n") do
     false
   end
 
-  defp valid_7bit("\r") do
+  defp valid_7bit?("\r") do
     false
   end
 
-  defp valid_7bit(<<>>) do
+  defp valid_7bit?(<<>>) do
     true
   end
 
-  defp valid_7bit(<<_>>) do
+  defp valid_7bit?(<<_>>) do
     true
   end
 
-  defp valid_7bit(body) do
+  defp valid_7bit?(body) do
     size = byte_size(body)
 
     case :binary.at(body, size - 1) === 10 and :binary.at(body, size - 2) !== 13 do
@@ -1091,30 +1067,37 @@ defmodule Postbeam.SMTP.MIME do
                ],
                capture: :none
              ) do
-          :match -> not has_lines_over_998(body)
+          :match -> not has_lines_over_998?(body)
           :nomatch -> false
         end
     end
   end
 
-  defp has_lines_over_998(body) do
+  @spec has_lines_over_998?(binary()) :: boolean()
+  defp has_lines_over_998?(body) do
     pattern = :binary.compile_pattern("\r\n")
-    has_lines_over_998(body, :binary.match(body, pattern), 0, pattern)
+    has_lines_over_998?(body, :binary.match(body, pattern), 0, pattern)
   end
 
-  defp has_lines_over_998(bin, :nomatch, offset, _) do
+  @spec has_lines_over_998?(
+          binary(),
+          :nomatch | {non_neg_integer(), non_neg_integer()},
+          non_neg_integer(),
+          :binary.cp()
+        ) :: boolean()
+  defp has_lines_over_998?(bin, :nomatch, offset, _) do
     byte_size(bin) - offset >= 998
   end
 
-  defp has_lines_over_998(_bin, {found_at, 2}, offset, _patern) when found_at - offset >= 998 do
+  defp has_lines_over_998?(_bin, {found_at, 2}, offset, _patern) when found_at - offset >= 998 do
     true
   end
 
-  defp has_lines_over_998(bin, {found_at, 2}, _, pattern) do
+  defp has_lines_over_998?(bin, {found_at, 2}, _, pattern) do
     new_offset = found_at + 2
     len = byte_size(bin) - new_offset
 
-    has_lines_over_998(
+    has_lines_over_998?(
       bin,
       :binary.match(bin, pattern, scope: {new_offset, len}),
       new_offset,
@@ -1122,273 +1105,8 @@ defmodule Postbeam.SMTP.MIME do
     )
   end
 
-  @spec encode_parameters(list({binary(), binary()})) :: list(binary())
-  defp encode_parameters([[]]) do
-    []
-  end
-
-  defp encode_parameters(parameters) do
-    :lists.foldr(
-      fn {name, value}, acc ->
-        {method, enc_len} = decide_param_encoding_method(value)
-        enc_params = encode_parameter(method, name, value, enc_len)
-        enc_params ++ acc
-      end,
-      [],
-      parameters
-    )
-  end
-
-  @spec encode_parameter(
-          :plain | :quote | :encode | :encode_utf8,
-          binary(),
-          binary(),
-          non_neg_integer()
-        ) :: list(binary())
-  defp encode_parameter(method, name, value, enc_len) do
-    encode_parameter(method, name, 0, value, enc_len, [])
-  end
-
-  defp encode_parameter(_method, _name, _index, <<>>, _enc_len, acc) do
-    :lists.reverse(acc)
-  end
-
-  defp encode_parameter(:encode_utf8, name, 0, value, enc_len, _acc)
-       when byte_size(name) + 9 + enc_len <= 76 do
-    {encoded, <<>>} = encode_param_value(:encode, value, 67 - byte_size(name))
-    [<<name::binary, "*=UTF-8''", encoded::binary>>]
-  end
-
-  defp encode_parameter(:encode_utf8, name, 0, value, enc_len, acc) do
-    {encoded, more} = encode_param_value(:encode, value, 65 - byte_size(name))
-
-    encode_parameter(:encode, name, 1, more, enc_len, [
-      <<name::binary, "*0*=UTF-8''", encoded::binary>> | acc
-    ])
-  end
-
-  defp encode_parameter(:encode, name, 0, value, enc_len, _acc)
-       when byte_size(name) + 4 + enc_len <= 76 do
-    {encoded, <<>>} = encode_param_value(:encode, value, 72 - byte_size(name))
-    [<<name::binary, "*=''", encoded::binary>>]
-  end
-
-  defp encode_parameter(:encode, name, 0, value, enc_len, acc) do
-    prefix = <<name::binary, 42, 48, 42>>
-    {encoded, more} = encode_param_value(:encode, value, 73 - byte_size(prefix))
-
-    encode_parameter(:encode, name, 1, more, enc_len, [
-      <<prefix::binary, "=''", encoded::binary>> | acc
-    ])
-  end
-
-  defp encode_parameter(:encode, name, index, value, enc_len, acc) do
-    prefix = <<name::binary, 42, :erlang.integer_to_binary(index)::binary, 42>>
-    {encoded, more} = encode_param_value(:encode, value, 75 - byte_size(prefix))
-
-    encode_parameter(:encode, name, index + 1, more, enc_len, [
-      <<prefix::binary, "=", encoded::binary>> | acc
-    ])
-  end
-
-  defp encode_parameter(:quote, name, 0, value, enc_len, _acc)
-       when byte_size(name) + 2 + enc_len + 1 <= 76 do
-    {quoted, <<>>} = encode_param_value(:quote, value, 73 - byte_size(name))
-    [<<name::binary, 61, 34, quoted::binary, 34>>]
-  end
-
-  defp encode_parameter(:quote, name, index, value, enc_len, acc) do
-    prefix = <<name::binary, 42, :erlang.integer_to_binary(index)::binary>>
-    {quoted, more} = encode_param_value(:quote, value, 73 - byte_size(prefix))
-
-    encode_parameter(:quote, name, index + 1, more, enc_len, [
-      <<prefix::binary, 61, 34, quoted::binary, 34>> | acc
-    ])
-  end
-
-  defp encode_parameter(:plain, name, 0, value, enc_len, _acc)
-       when byte_size(name) + 1 + enc_len <= 76 do
-    {plain, <<>>} = encode_param_value(:plain, value, 75 - byte_size(name))
-    [<<name::binary, 61, plain::binary>>]
-  end
-
-  defp encode_parameter(:plain, name, index, value, enc_len, acc) do
-    prefix = <<name::binary, 42, :erlang.integer_to_binary(index)::binary>>
-    {plain, more} = encode_param_value(:plain, value, 75 - byte_size(prefix))
-
-    encode_parameter(:plain, name, index + 1, more, enc_len, [
-      <<prefix::binary, 61, plain::binary>> | acc
-    ])
-  end
-
-  @spec encode_param_value(:plain | :quote | :encode, binary(), integer()) :: {binary(), binary()}
-  defp encode_param_value(:plain, value, len) do
-    len1 = max(len, 1)
-
-    case value do
-      <<part::size(^len1)-bytes, more::binary>> -> {part, more}
-      _ -> {value, <<>>}
-    end
-  end
-
-  defp encode_param_value(:quote, value, len) do
-    encode_param_value_quote(value, len, <<>>)
-  end
-
-  defp encode_param_value(:encode, value, len) do
-    encode_param_value_encode(value, len, <<>>)
-  end
-
-  defp encode_param_value_quote(<<>>, _len, acc) do
-    {acc, <<>>}
-  end
-
-  defp encode_param_value_quote(<<c, more::binary>> = all, len, acc) do
-    case c === 34 or c === 92 do
-      true when len >= 2 or acc === <<>> ->
-        encode_param_value_quote(more, len - 2, <<acc::binary, 92, c>>)
-
-      false when len >= 1 or acc === <<>> ->
-        encode_param_value_quote(more, len - 1, <<acc::binary, c>>)
-
-      _ ->
-        {acc, all}
-    end
-  end
-
-  defp encode_param_value_encode(<<>>, _len, acc) do
-    {acc, <<>>}
-  end
-
-  defp encode_param_value_encode(<<c, more::binary>> = all, len, acc)
-       when c <= 31 or c === 127 or c === 40 or c === 41 or c === 60 or c === 62 or c === 64 or
-              c === 44 or c === 59 or c === 58 or c === 47 or c === 91 or c === 93 or c === 63 or
-              c === 61 or c === 32 or c === 42 or c === 39 or c === 37 do
-    case len >= 3 or acc === <<>> do
-      true ->
-        <<n1::4, n2::4>> = <<c>>
-        encode_param_value_encode(more, len - 3, <<acc::binary, 37, hex(n1), hex(n2)>>)
-
-      false ->
-        {acc, all}
-    end
-  end
-
-  defp encode_param_value_encode(<<c, more::binary>> = all, len, acc) do
-    case c >= 128 do
-      true when len >= 3 or acc === <<>> ->
-        <<n1::4, n2::4>> = <<c>>
-        encode_param_value_encode(more, len - 3, <<acc::binary, 37, hex(n1), hex(n2)>>)
-
-      false when len >= 1 or acc === <<>> ->
-        encode_param_value_encode(more, len - 1, <<acc::binary, c>>)
-
-      _ ->
-        {acc, all}
-    end
-  end
-
-  @spec decide_param_encoding_method(binary()) ::
-          {:plain | :quote | :encode | :encode_utf8, non_neg_integer()}
-  defp decide_param_encoding_method(value) do
-    decide_param_encoding_method(value, :plain, 0, 0, 0)
-  end
-
-  defp decide_param_encoding_method(<<>>, method, l_p, l_q, l_e) do
-    l =
-      case method do
-        :plain -> l_p
-        :quote -> l_q
-        :encode -> l_e
-        :encode_utf8 -> l_e
-      end
-
-    {method, l}
-  end
-
-  defp decide_param_encoding_method(<<c::utf8, rest::binary>>, method, l_p, l_q, l_e)
-       when byte_size(<<c::utf8>>) > 1 do
-    decide_param_encoding_method(
-      rest,
-      change_param_encoding_method(method, :encode_utf8),
-      l_p,
-      l_q,
-      l_e + 3 * byte_size(<<c::utf8>>)
-    )
-  end
-
-  defp decide_param_encoding_method(<<c, rest::binary>>, method, l_p, l_q, l_e)
-       when c <= 31 or c >= 127 do
-    decide_param_encoding_method(
-      rest,
-      change_param_encoding_method(method, :encode),
-      l_p,
-      l_q,
-      l_e + 3
-    )
-  end
-
-  defp decide_param_encoding_method(<<c, rest::binary>>, method, l_p, l_q, l_e)
-       when c === 34 or c === 92 do
-    decide_param_encoding_method(
-      rest,
-      change_param_encoding_method(method, :quote),
-      l_p,
-      l_q + 2,
-      l_e + 3
-    )
-  end
-
-  defp decide_param_encoding_method(<<c, rest::binary>>, method, l_p, l_q, l_e)
-       when c === 40 or c === 41 or c === 60 or c === 62 or c === 64 or c === 44 or c === 59 or
-              c === 58 or c === 47 or c === 91 or c === 93 or c === 63 or c === 61 or c === 32 do
-    decide_param_encoding_method(
-      rest,
-      change_param_encoding_method(method, :quote),
-      l_p,
-      l_q + 1,
-      l_e + 3
-    )
-  end
-
-  defp decide_param_encoding_method(<<c, rest::binary>>, method, l_p, l_q, l_e)
-       when c === 42 or c === 39 or c === 37 do
-    decide_param_encoding_method(rest, method, l_p + 1, l_q + 1, l_e + 3)
-  end
-
-  defp decide_param_encoding_method(<<_, rest::binary>>, method, l_p, l_q, l_e) do
-    decide_param_encoding_method(rest, method, l_p + 1, l_q + 1, l_e + 1)
-  end
-
-  @spec change_param_encoding_method(cur_method, new_method) :: method
-        when cur_method: method,
-             new_method: method,
-             method: :plain | :quote | :encode | :encode_utf8
-  defp change_param_encoding_method(method, method) do
-    method
-  end
-
-  defp change_param_encoding_method(cur_method, new_method) do
-    change_param_encoding_method([:encode_utf8, :encode, :quote], cur_method, new_method)
-  end
-
-  defp change_param_encoding_method([cur_method | _more], cur_method, _new_method) do
-    cur_method
-  end
-
-  defp change_param_encoding_method([new_method | _more], _cur_method, new_method) do
-    new_method
-  end
-
-  defp change_param_encoding_method([_ | more], cur_method, new_method) do
-    change_param_encoding_method(more, cur_method, new_method)
-  end
-
-  defp change_param_encoding_method([], _cur_method, new_method) do
-    new_method
-  end
-
   @doc false
+  @spec encode_headers(headers()) :: [binary()]
   def encode_headers([]) do
     []
   end
@@ -1403,6 +1121,7 @@ defmodule Postbeam.SMTP.MIME do
     [encoded_header | encode_headers(t)]
   end
 
+  @spec maybe_encode_folded_header(binary(), binary()) :: binary()
   defp maybe_encode_folded_header(h, hdr)
        when h === "To" or h === "Cc" or h === "Bcc" or h === "Reply-To" or h === "From" do
     hdr
@@ -1412,8 +1131,9 @@ defmodule Postbeam.SMTP.MIME do
     encode_folded_header(hdr, <<>>)
   end
 
+  @spec encode_folded_header(binary(), binary()) :: binary()
   defp encode_folded_header(rest, acc) do
-    case Postbeam.SMTP.Binary.split(rest, <<59>>, 2) do
+    case Binary.split(rest, <<59>>, 2) do
       [_] ->
         <<acc::binary, rest::binary>>
 
@@ -1428,21 +1148,25 @@ defmodule Postbeam.SMTP.MIME do
     end
   end
 
+  @spec encode_header_value(binary(), binary()) :: binary()
   defp encode_header_value(h, value)
        when h === "To" or h === "Cc" or h === "Bcc" or h === "Reply-To" or h === "From" do
-    {:ok, addresses} = Postbeam.SMTP.Util.parse_rfc5322_addresses(value)
+    {:ok, addresses} = Util.parse_rfc5322_addresses(value)
     {names, emails} = :lists.unzip(addresses)
 
     new_names =
       :lists.map(
         fn
-          :undefined -> :undefined
-          name -> rfc2047_utf8_encode(:unicode.characters_to_binary(name))
+          :undefined ->
+            :undefined
+
+          name ->
+            EncodedWord.rfc2047_utf8_encode(:unicode.characters_to_binary(name))
         end,
         names
       )
 
-    Postbeam.SMTP.Util.combine_rfc822_addresses(:lists.zip(new_names, emails))
+    Util.combine_rfc822_addresses(:lists.zip(new_names, emails))
   end
 
   defp encode_header_value(h, value) when h === "Content-Type" or h === "Content-Disposition" do
@@ -1450,9 +1174,16 @@ defmodule Postbeam.SMTP.MIME do
   end
 
   defp encode_header_value(_, value) do
-    rfc2047_utf8_encode(value)
+    EncodedWord.rfc2047_utf8_encode(value)
   end
 
+  @spec encode_component(
+          binary(),
+          binary(),
+          headers(),
+          parameters(),
+          binary() | mimetuple() | [mimetuple()]
+        ) :: iodata()
   defp encode_component(_type, _sub_type, _headers, params, body) when is_list(body) do
     boundary = :proplists.get_value("boundary", :maps.get(:content_type_params, params))
 
@@ -1464,9 +1195,13 @@ defmodule Postbeam.SMTP.MIME do
   end
 
   defp encode_component(_type, _sub_type, headers, _params, body) do
-    encode_body(get_header_value("Content-Transfer-Encoding", headers), [body])
+    TransferEncoding.encode_body(
+      get_header_value("Content-Transfer-Encoding", headers),
+      [body]
+    )
   end
 
+  @spec encode_component_part(mimetuple()) :: iodata()
   defp encode_component_part({"multipart", sub_type, headers, part_params, body}) do
     {fixed_params, fixed_headers} =
       ensure_content_headers("multipart", sub_type, part_params, headers, body, false)
@@ -1487,200 +1222,22 @@ defmodule Postbeam.SMTP.MIME do
 
     encode_headers(fixed_headers) ++
       [<<>>] ++
-      encode_body(get_header_value("Content-Transfer-Encoding", fixed_headers), part_data)
+      TransferEncoding.encode_body(
+        get_header_value("Content-Transfer-Encoding", fixed_headers),
+        part_data
+      )
   end
 
-  defp encode_component_part(part) do
-    Postbeam.SMTP.Log.debug(~c"encode_component_part couldn't match Part to: ~p", [part], %{
-      domain: [:postbeam]
-    })
-
+  defp encode_component_part(_part) do
     []
   end
 
-  defp encode_body(:undefined, body) do
-    body
-  end
-
-  defp encode_body(type, body) do
-    case Postbeam.SMTP.Binary.to_lower(type) do
-      "quoted-printable" ->
-        [inner_body] = body
-        encode_quoted_printable(inner_body)
-
-      "base64" ->
-        [inner_body] = body
-        wrap_to_76(:base64.encode(inner_body))
-
-      _ ->
-        body
-    end
-  end
-
-  defp wrap_to_76(string) do
-    [wrap_to_76(string, [])]
-  end
-
-  defp wrap_to_76(<<>>, acc) do
-    :erlang.list_to_binary(:lists.reverse(acc))
-  end
-
-  defp wrap_to_76(<<head::size(76)-binary, tail::binary>>, acc) do
-    wrap_to_76(tail, ["\r\n", head | acc])
-  end
-
-  defp wrap_to_76(head, acc) do
-    :erlang.list_to_binary(:lists.reverse(["\r\n", head | acc]))
-  end
-
-  def encode_quoted_printable(body) do
-    [encode_quoted_printable(body, <<>>, 0, false, <<>>, 0)]
-  end
-
-  defp encode_quoted_printable(<<>>, acc, _line_len, _has_wsp, word_acc, _word_len) do
-    <<acc::binary, word_acc::binary>>
-  end
-
-  defp encode_quoted_printable(
-         <<13, 10, more::binary>>,
-         acc,
-         _line_len,
-         _has_wsp,
-         word_acc,
-         _word_len
-       ) do
-    encode_quoted_printable(more, <<acc::binary, word_acc::binary, 13, 10>>, 0, false, <<>>, 0)
-  end
-
-  defp encode_quoted_printable(<<c>>, acc, line_len, _has_wsp, word_acc, word_len)
-       when c === 32 or c === 9 do
-    enc = encode_quoted_printable_char(c, true)
-
-    case line_len + word_len + 3 > 76 do
-      true -> <<acc::binary, word_acc::binary, 61, 13, 10, enc::binary>>
-      false -> <<acc::binary, word_acc::binary, enc::binary>>
-    end
-  end
-
-  defp encode_quoted_printable(
-         <<c, 13, 10, more::binary>>,
-         acc,
-         line_len,
-         _has_wsp,
-         word_acc,
-         word_len
-       )
-       when c === 32 or c === 9 do
-    enc = encode_quoted_printable_char(c, true)
-
-    case line_len + word_len + 3 > 76 do
-      true ->
-        encode_quoted_printable(
-          more,
-          <<acc::binary, word_acc::binary, 61, 13, 10, enc::binary, 13, 10>>,
-          0,
-          false,
-          <<>>,
-          0
-        )
-
-      false ->
-        encode_quoted_printable(
-          more,
-          <<acc::binary, word_acc::binary, enc::binary, 13, 10>>,
-          0,
-          false,
-          <<>>,
-          0
-        )
-    end
-  end
-
-  defp encode_quoted_printable(<<c, more::binary>>, acc, line_len, has_wsp, word_acc, word_len) do
-    enc = encode_quoted_printable_char(c, false)
-    enc_len = byte_size(enc)
-
-    case line_len + word_len + enc_len > 75 do
-      true when c === 32 or c === 9 ->
-        encode_quoted_printable(
-          more,
-          <<acc::binary, word_acc::binary, 61, 13, 10, enc::binary>>,
-          enc_len,
-          true,
-          <<>>,
-          0
-        )
-
-      true when has_wsp and word_len + enc_len <= 75 ->
-        encode_quoted_printable(
-          more,
-          <<acc::binary, 61, 13, 10, word_acc::binary, enc::binary>>,
-          word_len + enc_len,
-          false,
-          <<>>,
-          0
-        )
-
-      true ->
-        encode_quoted_printable(
-          more,
-          <<acc::binary, word_acc::binary, 61, 13, 10, enc::binary>>,
-          enc_len,
-          false,
-          <<>>,
-          0
-        )
-
-      false when c === 32 or c === 9 ->
-        encode_quoted_printable(
-          more,
-          <<acc::binary, word_acc::binary, enc::binary>>,
-          line_len + word_len + enc_len,
-          true,
-          <<>>,
-          0
-        )
-
-      false ->
-        encode_quoted_printable(
-          more,
-          acc,
-          line_len,
-          has_wsp,
-          <<word_acc::binary, enc::binary>>,
-          word_len + enc_len
-        )
-    end
-  end
-
-  defp encode_quoted_printable_char(c, true) do
-    <<61, hex(div(c, 16)), hex(rem(c, 16))>>
-  end
-
-  defp encode_quoted_printable_char(32, false) do
-    <<32>>
-  end
-
-  defp encode_quoted_printable_char(9, false) do
-    <<9>>
-  end
-
-  defp encode_quoted_printable_char(61, _force) do
-    <<61, 51, 68>>
-  end
-
-  defp encode_quoted_printable_char(c, _force) when c <= 32 or c >= 127 do
-    encode_quoted_printable_char(c, true)
-  end
-
-  defp encode_quoted_printable_char(c, false) do
-    <<c>>
-  end
-
-  defp get_default_encoding() do
+  @spec get_default_encoding() :: binary() | :raw
+  defp get_default_encoding do
     if Code.ensure_loaded?(:iconv), do: "utf-8//IGNORE", else: :raw
   end
 
+  @spec fix_encoding(binary() | :undefined) :: binary() | :undefined
   defp fix_encoding(encoding) when encoding == "utf8" or encoding == "UTF8" do
     "UTF-8"
   end
@@ -1689,190 +1246,11 @@ defmodule Postbeam.SMTP.MIME do
     encoding
   end
 
-  defp rfc2047_utf8_encode(value) do
-    rfc2047_utf8_encode(value, 0, " ")
-  end
+  @doc "Decodes a quoted-printable body into its original bytes."
+  @spec decode_quoted_printable(binary()) :: binary()
+  defdelegate decode_quoted_printable(body), to: TransferEncoding
 
-  defp rfc2047_utf8_encode(value, prefix_len, line_indent) when is_binary(value) do
-    case is_ascii_printable(value) do
-      true ->
-        value
-
-      false ->
-        {readable, encoded} =
-          partition_count_bytes(
-            fn c ->
-              c in ?a..?z or c in ?A..?Z or c in ?0..?9 or c in ~c" !*+-/"
-            end,
-            value
-          )
-
-        enc = if readable >= encoded, do: :q, else: :b
-
-        rfc2047_utf8_encode(enc, value, <<>>, prefix_len, line_indent)
-    end
-  end
-
-  defp rfc2047_utf8_encode(value, prefix_len, line_indent) do
-    rfc2047_utf8_encode(:erlang.list_to_binary(value), prefix_len, line_indent)
-  end
-
-  defp rfc2047_utf8_encode(_enc, <<>>, acc, _prefix_len, _line_indent) do
-    acc
-  end
-
-  defp rfc2047_utf8_encode(:b, more, acc, prefix_len, line_indent) do
-    rfc2047_utf8_encode(:b, more, acc, <<>>, byte_size(line_indent), line_indent, 46 - prefix_len)
-  end
-
-  defp rfc2047_utf8_encode(:q, more, acc, prefix_len, line_indent) do
-    rfc2047_utf8_encode(:q, more, acc, <<>>, byte_size(line_indent), line_indent, 63 - prefix_len)
-  end
-
-  defp rfc2047_utf8_encode(enc, <<>>, acc, word_acc, _prefix_len, line_indent, _left) do
-    rfc2047_append_word(acc, word_acc, enc, line_indent)
-  end
-
-  defp rfc2047_utf8_encode(
-         enc,
-         <<c::utf8, more::binary>> = all,
-         acc,
-         word_acc,
-         prefix_len,
-         line_indent,
-         left
-       ) do
-    bytes = <<c::utf8>>
-    size = byte_size(bytes)
-
-    reqd =
-      case enc do
-        :q
-        when not (c === 32 or
-                      ((c >= 97 and c <= 122) or
-                         ((c >= 65 and c <= 90) or
-                            ((c >= 48 and c <= 57) or
-                               (c === 33 or (c === 42 or (c === 43 or (c === 45 or c === 47)))))))) ->
-          3 * size
-
-        :q ->
-          size
-
-        :b ->
-          size
-      end
-
-    case left >= reqd do
-      true ->
-        rfc2047_utf8_encode(
-          enc,
-          more,
-          acc,
-          <<word_acc::binary, bytes::binary>>,
-          prefix_len,
-          line_indent,
-          left - reqd
-        )
-
-      false ->
-        rfc2047_utf8_encode(
-          enc,
-          all,
-          rfc2047_append_word(acc, word_acc, enc, line_indent),
-          prefix_len,
-          line_indent
-        )
-    end
-  end
-
-  defp rfc2047_append_word(acc, <<>>, _enc, _line_indent) do
-    acc
-  end
-
-  defp rfc2047_append_word(<<>>, word, enc, _line_indent) do
-    rfc2047_encode_word(word, enc)
-  end
-
-  defp rfc2047_append_word(acc, word, enc, line_indent) do
-    <<acc::binary, 13, 10, line_indent::binary, rfc2047_encode_word(word, enc)::binary>>
-  end
-
-  defp rfc2047_encode_word(word, :q) do
-    <<"=?UTF-8?Q?", rfc2047_q_encode(word)::binary, "?=">>
-  end
-
-  defp rfc2047_encode_word(word, :b) do
-    <<"=?UTF-8?B?", :base64.encode(word)::binary, "?=">>
-  end
-
-  defp rfc2047_q_encode(<<>>) do
-    <<>>
-  end
-
-  defp rfc2047_q_encode(<<32, more::binary>>) do
-    <<95, rfc2047_q_encode(more)::binary>>
-  end
-
-  defp rfc2047_q_encode(<<c, more::binary>>)
-       when c === 32 or
-              ((c >= 97 and c <= 122) or
-                 ((c >= 65 and c <= 90) or
-                    ((c >= 48 and c <= 57) or
-                       (c === 33 or (c === 42 or (c === 43 or (c === 45 or c === 47))))))) do
-    <<c, rfc2047_q_encode(more)::binary>>
-  end
-
-  defp rfc2047_q_encode(<<n1::4, n2::4, more::binary>>) do
-    <<61, hex(n1), hex(n2), rfc2047_q_encode(more)::binary>>
-  end
-
-  defp is_ascii_printable(<<>>) do
-    true
-  end
-
-  defp is_ascii_printable(<<h, t::binary>>) when h >= 32 and h <= 126 do
-    is_ascii_printable(t)
-  end
-
-  defp is_ascii_printable(_) do
-    false
-  end
-
-  defp hex(n) when n >= 10 do
-    n + 65 - 10
-  end
-
-  defp hex(n) do
-    n + 48
-  end
-
-  defp unhex(c) when c >= 97 do
-    c - 97 + 10
-  end
-
-  defp unhex(c) when c >= 65 do
-    c - 65 + 10
-  end
-
-  defp unhex(c) do
-    c - 48
-  end
-
-  defp partition_count_bytes(fun, bin) do
-    partition_count_bytes(fun, bin, {0, 0})
-  end
-
-  defp partition_count_bytes(_fun, <<>>, partition_counts) do
-    partition_counts
-  end
-
-  defp partition_count_bytes(fun, <<c, more::binary>>, {trues, falses}) do
-    new_partition_counts =
-      case fun.(c) do
-        true -> {trues + 1, falses}
-        false -> {trues, falses + 1}
-      end
-
-    partition_count_bytes(fun, more, new_partition_counts)
-  end
+  @doc "Encodes a quoted-printable body with SMTP-compatible line wrapping."
+  @spec encode_quoted_printable(binary()) :: [binary()]
+  defdelegate encode_quoted_printable(body), to: TransferEncoding
 end

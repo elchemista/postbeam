@@ -60,7 +60,7 @@
 -define(TIMEOUT, 180000).
 -define(LOGGER_META, #{domain => [postbeam, server]}).
 check_bare_crlf(A1, A2, A3, A4) -> 'Elixir.Postbeam.SMTP.Session.DataReader':check_bare_crlf(A1, A2, A3, A4).
-parse_encoded_address(A1, A2) -> 'Elixir.Postbeam.SMTP.Session':parse_encoded_address(A1, A2).
+parse_encoded_address(A1, A2) -> 'Elixir.Postbeam.SMTP.Session.Address':parse_encoded_address(A1, A2).
 parse_request(A1) -> 'Elixir.Postbeam.SMTP.Session':parse_request(A1).
 
 parse_encoded_address_test_() ->

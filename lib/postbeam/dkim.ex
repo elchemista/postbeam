@@ -16,7 +16,9 @@ defmodule Postbeam.DKIM do
   new selector, call `setup/1`, publish its record, then switch delivery settings.
   No DNS is modified and no email is sent by this module.
   """
+
   alias Postbeam.Config
+  alias Postbeam.KeyStore
   alias Postbeam.Store
 
   @type dns_record :: %{
@@ -80,7 +82,7 @@ defmodule Postbeam.DKIM do
       else: {:ok, dkim}
   end
 
-  @spec load(keyword(), Postbeam.KeyStore.adapter()) ::
+  @spec load(keyword(), KeyStore.adapter()) ::
           {:ok, binary(), tuple()} | {:error, error()}
   defp load(dkim, store) do
     id = {String.downcase(dkim[:d]), String.downcase(dkim[:s])}
@@ -91,7 +93,7 @@ defmodule Postbeam.DKIM do
     end
   end
 
-  @spec generate(Postbeam.KeyStore.id(), Postbeam.KeyStore.adapter()) ::
+  @spec generate(KeyStore.id(), KeyStore.adapter()) ::
           {:ok, binary(), tuple()} | {:error, error()}
   defp generate(id, store) do
     key = :public_key.generate_key({:rsa, 2048, 65_537})

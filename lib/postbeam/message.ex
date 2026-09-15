@@ -13,10 +13,14 @@ defmodule Postbeam.Message do
   Encoded attachments contain loaded bytes and no source paths.
   """
 
+  alias Postbeam.Attachment
+  alias Postbeam.Headers
+
   alias Postbeam.Address
   alias Postbeam.Config
   alias Postbeam.DKIM
   alias Postbeam.MIME
+  alias Postbeam.Validation
 
   @enforce_keys [:from, :to, :subject, :domain]
   defstruct [
@@ -45,7 +49,7 @@ defmodule Postbeam.Message do
   @type validation_error :: {:invalid, atom()} | {:unknown_field, term()}
   @type composition_error ::
           {:composition, atom()}
-          | Postbeam.DKIM.error()
+          | DKIM.error()
           | {:attachment, non_neg_integer(), atom()}
   @typedoc "A validated message, optionally already encoded."
   @type t :: message(binary() | nil, String.t() | nil)
@@ -60,8 +64,8 @@ defmodule Postbeam.Message do
            html: String.t() | nil,
            data: data,
            message_id: id,
-           headers: Postbeam.Headers.t() | nil,
-           attachments: [Postbeam.Attachment.t()]
+           headers: Headers.t() | nil,
+           attachments: [Attachment.t()]
          }
 
   @doc """
@@ -86,13 +90,13 @@ defmodule Postbeam.Message do
   end
 
   def new(input) when is_map(input) and not is_struct(input) do
-    with [] <- Map.keys(input) -- [:from, :to, :subject, :text, :html],
+    with :ok <- validate_fields(input),
          {:ok, from, _} <- Address.new(input[:from], :from),
          {:ok, to, domain} <- Address.new(input[:to], :to),
-         :ok <- validate(Config.header?(input[:subject]), :subject),
-         :ok <- validate(body?(input[:text]), :text),
-         :ok <- validate(body?(input[:html]), :html),
-         :ok <- validate(is_binary(input[:text]) or is_binary(input[:html]), :body) do
+         :ok <- Validation.check(Config.header?(input[:subject]), :subject),
+         :ok <- Validation.check(body?(input[:text]), :text),
+         :ok <- Validation.check(body?(input[:html]), :html),
+         :ok <- Validation.check(is_binary(input[:text]) or is_binary(input[:html]), :body) do
       {:ok,
        struct!(
          __MODULE__,
@@ -102,9 +106,6 @@ defmodule Postbeam.Message do
            domain: domain
          })
        )}
-    else
-      {:error, _} = error -> error
-      [field | _] -> {:error, {:unknown_field, field}}
     end
   end
 
@@ -127,11 +128,15 @@ defmodule Postbeam.Message do
     with {:ok, config} <- DKIM.prepare(config), do: MIME.encode(message, config)
   end
 
+  @spec validate_fields(map()) :: :ok | {:error, {:unknown_field, term()}}
+  defp validate_fields(input) do
+    case Map.keys(input) -- [:from, :to, :subject, :text, :html] do
+      [] -> :ok
+      [field | _] -> {:error, {:unknown_field, field}}
+    end
+  end
+
   @spec body?(term()) :: boolean()
   defp body?(nil), do: true
   defp body?(body), do: is_binary(body) and String.valid?(body)
-
-  @spec validate(boolean(), atom()) :: :ok | {:error, {:invalid, atom()}}
-  defp validate(true, _), do: :ok
-  defp validate(false, field), do: {:error, {:invalid, field}}
 end

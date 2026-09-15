@@ -27,6 +27,10 @@ defmodule Postbeam.MixProject do
         ]
       ],
       start_permanent: Mix.env() == :prod,
+      aliases: [
+        "test.smtp": ["test test/smtp test/smtp_test.exs test/inbound_test.exs"],
+        "test.smtp.properties": ["test test/smtp/properties_test.exs"]
+      ],
       deps: deps(),
       docs: [
         main: "readme",
@@ -45,25 +49,26 @@ defmodule Postbeam.MixProject do
       description:
         "Direct-to-MX SMTP delivery and incoming email with application-owned adapters",
       package: [
-        licenses: ["Apache-2.0", "BSD-2-Clause", "MIT"],
+        licenses: ["Apache-2.0"],
         links: %{"GitHub" => "https://github.com/elchemista/postbeam"},
         files: [
           "lib",
           "src/*.xrl",
           "src/*.yrl",
-          "licenses",
           "examples",
           "docs",
           "mix.exs",
           "README.md",
           "LICENSE",
-          "NOTICE",
           ".formatter.exs",
           ".credo.exs"
         ]
       ]
     ]
   end
+
+  def cli,
+    do: [preferred_envs: ["test.smtp": :test, "test.smtp.properties": :test]]
 
   def application,
     do: [

@@ -1,6 +1,3 @@
-# Preserve the imported SMTP callback API and protocol branch structure.
-# credo:disable-for-this-file Credo.Check.Refactor.CyclomaticComplexity
-# credo:disable-for-this-file Credo.Check.Refactor.Nesting
 # Copyright 2009 Andrew Thompson <andrew@hijacked.us>. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
@@ -26,62 +23,81 @@
 defmodule Postbeam.SMTP.Session.DataReader do
   @moduledoc false
 
-  # Keep a short suffix between reads so framing never depends on TCP packet
-  # boundaries. Completed chunks stay as iodata until the whole message arrives.
+  alias Postbeam.SMTP.Binary
+
+  defstruct [:transport, :socket, :max_size, :mode, chunks: [], pending: "", size: 0]
+
+  @typep mode :: false | :ignore | :fix | :strip
+  @typep t :: %__MODULE__{
+           transport: module(),
+           socket: term(),
+           max_size: non_neg_integer() | :infinity,
+           mode: mode(),
+           chunks: [binary()],
+           pending: binary(),
+           size: non_neg_integer()
+         }
+  @typep result :: {:receive_data, binary(), binary()} | {:receive_data, {:error, term()}}
+
+  @doc false
+  @spec read(module(), term(), non_neg_integer() | :infinity, keyword()) :: result()
   def read(transport, socket, max_size, options) do
-    mode = Keyword.get(options, :allow_bare_newlines, false)
-    receive_data(transport, socket, max_size, mode, [], "", 0)
+    receive_data(%__MODULE__{
+      transport: transport,
+      socket: socket,
+      max_size: max_size,
+      mode: Keyword.get(options, :allow_bare_newlines, false)
+    })
   end
 
-  defp receive_data(transport, socket, max_size, mode, chunks, pending, size) do
-    case transport.recv(socket, 0, 1000) do
-      {:ok, packet} ->
-        data = pending <> packet
-
-        case terminator(data, chunks == []) do
-          {offset, length} ->
-            body = binary_part(data, 0, offset)
-            rest = binary_part(data, offset + length, byte_size(data) - offset - length)
-
-            with {:ok, chunk} <- normalize(body, mode),
-                 :ok <- check_size(size + byte_size(chunk), max_size) do
-              {:receive_data, IO.iodata_to_binary(Enum.reverse([chunk | chunks])), rest}
-            else
-              {:error, reason} -> {:receive_data, {:error, reason}}
-            end
-
-          :nomatch ->
-            {body, pending} = split_pending(data)
-
-            with {:ok, chunk} <- normalize(body, mode),
-                 :ok <- check_size(size + byte_size(chunk), max_size) do
-              chunks = if chunk == "", do: chunks, else: [chunk | chunks]
-
-              receive_data(
-                transport,
-                socket,
-                max_size,
-                mode,
-                chunks,
-                pending,
-                size + byte_size(chunk)
-              )
-            else
-              {:error, reason} -> {:receive_data, {:error, reason}}
-            end
-        end
-
-      {:error, :timeout} ->
-        receive_data(transport, socket, max_size, mode, chunks, pending, size)
-
-      {:error, reason} ->
-        {:receive_data, {:error, reason}}
+  @spec receive_data(t()) :: result()
+  defp receive_data(state) do
+    case state.transport.recv(state.socket, 0, 1000) do
+      {:ok, packet} -> consume_packet(state, state.pending <> packet)
+      {:error, :timeout} -> receive_data(state)
+      {:error, reason} -> {:receive_data, {:error, reason}}
     end
   end
 
+  @spec consume_packet(t(), binary()) :: result()
+  defp consume_packet(state, data) do
+    case terminator(data, state.chunks == []) do
+      {offset, length} ->
+        <<body::binary-size(^offset), _terminator::binary-size(^length), rest::binary>> = data
+        finish(append_chunk(state, body), rest)
+
+      :nomatch ->
+        {body, pending} = split_pending(data)
+        continue(append_chunk(%{state | pending: pending}, body))
+    end
+  end
+
+  @spec append_chunk(t(), binary()) :: {:ok, t()} | {:error, :bare_newline | :size_exceeded}
+  defp append_chunk(state, body) do
+    with {:ok, chunk} <- normalize(body, state.mode),
+         size = state.size + byte_size(chunk),
+         :ok <- check_size(size, state.max_size) do
+      chunks = if chunk == "", do: state.chunks, else: [chunk | state.chunks]
+      {:ok, %{state | chunks: chunks, size: size}}
+    end
+  end
+
+  @spec finish({:ok, t()} | {:error, term()}, binary()) :: result()
+  defp finish({:ok, state}, rest) do
+    {:receive_data, state.chunks |> Enum.reverse() |> IO.iodata_to_binary(), rest}
+  end
+
+  defp finish({:error, reason}, _rest), do: {:receive_data, {:error, reason}}
+
+  @spec continue({:ok, t()} | {:error, term()}) :: result()
+  defp continue({:ok, state}), do: receive_data(state)
+  defp continue({:error, reason}), do: {:receive_data, {:error, reason}}
+
+  @spec terminator(binary(), boolean()) :: :nomatch | {non_neg_integer(), pos_integer()}
   defp terminator(<<".\r\n", _::binary>>, true), do: {0, 3}
   defp terminator(data, _first_chunk), do: :binary.match(data, "\r\n.\r\n")
 
+  @spec split_pending(binary()) :: {binary(), binary()}
   defp split_pending(data) when byte_size(data) <= 4, do: {"", data}
 
   defp split_pending(data) do
@@ -91,10 +107,11 @@ defmodule Postbeam.SMTP.Session.DataReader do
     {binary_part(data, 0, length), binary_part(data, length, byte_size(data) - length)}
   end
 
+  @spec normalize(binary(), mode()) :: {:ok, binary()} | {:error, :bare_newline}
   defp normalize(data, :ignore), do: {:ok, data}
 
   defp normalize(data, mode) do
-    case {check_for_bare_crlf(data, 0), mode} do
+    case {check_for_bare_crlf?(data, 0), mode} do
       {false, _} -> {:ok, data}
       {true, :fix} -> {:ok, fix_bare_crlf(data, 0)}
       {true, :strip} -> {:ok, strip_bare_crlf(data, 0)}
@@ -102,11 +119,14 @@ defmodule Postbeam.SMTP.Session.DataReader do
     end
   end
 
+  @spec check_size(non_neg_integer(), non_neg_integer() | :infinity) ::
+          :ok | {:error, :size_exceeded}
   defp check_size(_size, :infinity), do: :ok
   defp check_size(size, max_size) when size <= max_size, do: :ok
   defp check_size(_size, _max_size), do: {:error, :size_exceeded}
 
-  defp check_for_bare_crlf(bin, offset) do
+  @spec check_for_bare_crlf?(binary(), non_neg_integer()) :: boolean()
+  defp check_for_bare_crlf?(bin, offset) do
     case {:re.run(bin, ~c"(?<!\r)\n", capture: :none, offset: offset),
           :re.run(bin, ~c"\r(?!\n)", capture: :none, offset: offset)} do
       {:match, _} -> true
@@ -115,29 +135,30 @@ defmodule Postbeam.SMTP.Session.DataReader do
     end
   end
 
-  defp fix_bare_crlf(bin, offset) do
+  @spec fix_bare_crlf(binary(), non_neg_integer()) :: binary()
+  defp fix_bare_crlf(bin, offset), do: replace_bare_crlf(bin, offset, "\r\n")
+
+  @spec strip_bare_crlf(binary(), non_neg_integer()) :: binary()
+  defp strip_bare_crlf(bin, offset), do: replace_bare_crlf(bin, offset, "")
+
+  @spec replace_bare_crlf(binary(), non_neg_integer(), binary()) :: binary()
+  defp replace_bare_crlf(bin, offset, replacement) do
     options = [{:offset, offset}, {:return, :binary}, :global]
 
-    :re.replace(
-      :re.replace(bin, ~c"(?<!\r)\n", ~c"\r\n", options),
-      ~c"\r(?!\n)",
-      ~c"\r\n",
-      options
-    )
+    bin
+    |> :re.replace(~c"(?<!\r)\n", replacement, options)
+    |> :re.replace(~c"\r(?!\n)", replacement, options)
   end
 
-  defp strip_bare_crlf(bin, offset) do
-    options = [{:offset, offset}, {:return, :binary}, :global]
-    :re.replace(:re.replace(bin, ~c"(?<!\r)\n", [], options), ~c"\r(?!\n)", [], options)
-  end
-
+  @doc false
+  @spec check_bare_crlf(binary(), binary(), mode(), non_neg_integer()) :: binary() | :error
   def check_bare_crlf(binary, _, :ignore, _) do
     binary
   end
 
   def check_bare_crlf(<<10, _rest::binary>> = bin, prev, op, 0 = _offset)
       when byte_size(prev) > 0 do
-    lastchar = Postbeam.SMTP.Binary.substr(prev, -1)
+    lastchar = Binary.substr(prev, -1)
 
     case lastchar do
       "\r" -> check_bare_crlf(bin, <<>>, op, 1)
@@ -146,34 +167,32 @@ defmodule Postbeam.SMTP.Session.DataReader do
     end
   end
 
-  def check_bare_crlf(binary, _prev, op, offset) do
-    last = Postbeam.SMTP.Binary.substr(binary, -1)
+  def check_bare_crlf(binary, _prev, mode, offset) do
+    # Defer a final CR until its following byte is available in the next packet.
+    {body, pending} = split_trailing_cr(binary)
 
-    case last do
-      "\r" ->
-        new_bin = Postbeam.SMTP.Binary.substr(binary, 1, byte_size(binary) - 1)
+    case repair(body, mode, offset) do
+      :error -> :error
+      repaired -> repaired <> pending
+    end
+  end
 
-        case check_for_bare_crlf(new_bin, offset) do
-          true when op == :fix ->
-            :erlang.list_to_binary([fix_bare_crlf(new_bin, offset), ~c"\r"])
+  @spec split_trailing_cr(binary()) :: {binary(), binary()}
+  defp split_trailing_cr(binary) do
+    if String.ends_with?(binary, "\r") do
+      {binary_part(binary, 0, byte_size(binary) - 1), "\r"}
+    else
+      {binary, ""}
+    end
+  end
 
-          true when op == :strip ->
-            :erlang.list_to_binary([strip_bare_crlf(new_bin, offset), ~c"\r"])
-
-          true ->
-            :error
-
-          false ->
-            binary
-        end
-
-      _ ->
-        case check_for_bare_crlf(binary, offset) do
-          true when op == :fix -> fix_bare_crlf(binary, offset)
-          true when op == :strip -> strip_bare_crlf(binary, offset)
-          true -> :error
-          false -> binary
-        end
+  @spec repair(binary(), mode(), non_neg_integer()) :: binary() | :error
+  defp repair(binary, mode, offset) do
+    case {check_for_bare_crlf?(binary, offset), mode} do
+      {false, _} -> binary
+      {true, :fix} -> fix_bare_crlf(binary, offset)
+      {true, :strip} -> strip_bare_crlf(binary, offset)
+      {true, _} -> :error
     end
   end
 end

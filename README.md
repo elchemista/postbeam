@@ -7,6 +7,10 @@ email through an optional SMTP listener with your own handling adapter.
 The SMTP/LMTP engine, MIME codec and DKIM signer are included as native Elixir
 modules under `Postbeam.SMTP`. Postbeam does not depend on `gen_smtp`.
 
+The SMTP engine originates from the local Elixir rewrite of
+[gen_smtp](https://github.com/gen-smtp/gen_smtp). See [LICENSE](https://github.com/elchemista/postbeam/blob/master/LICENSE) for
+Postbeam's license.
+
 ## Install
 
 Requires Elixir 1.19+ and Erlang/OTP 26+. For a local checkout:
@@ -78,3 +82,14 @@ The adapter receives the raw MIME message and SMTP envelope, and decides whether
 to call an API, save to a database or handle the email another way. Postbeam has
 no built-in message storage. Return `:ok` to accept, or a temporary/permanent
 error to reject. [Complete adapter example and setup](docs/inbound.md).
+
+## Tests
+
+```sh
+mix test --cover                                    # Entire Postbeam suite
+mix test.smtp --trace                               # SMTP engine and integrations
+SMTP_PROPERTY_CASES=2000 mix test.smtp.properties    # Extended generated cases
+```
+
+All original SMTP tests and fixtures are included locally.
+[Test suite details](docs/smtp.md#run-the-complete-smtp-tests).

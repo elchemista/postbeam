@@ -2,23 +2,39 @@ defmodule Postbeam.Inbound.Session do
   # The callback names follow the SMTP commands in Postbeam.SMTP.Handler.
   # credo:disable-for-this-file Credo.Check.Readability.FunctionNames
   @moduledoc false
-  @behaviour Postbeam.SMTP.Handler
+
+  alias Postbeam.Inbound
+  alias Postbeam.SMTP.Handler
+  @behaviour Handler
+  @typep state :: %{
+           config: keyword(),
+           peer: :inet.ip_address(),
+           helo: binary() | nil,
+           tls: boolean()
+         }
 
   alias Postbeam.Config
   alias Postbeam.Inbound.Message
 
-  @impl true
+  @impl Handler
+  @doc false
+  @spec init(iodata(), non_neg_integer(), :inet.ip_address(), keyword()) ::
+          {:ok, iodata(), state()}
   def init(hostname, _session_count, peer, options) do
     state = %{config: options, peer: peer, helo: nil, tls: false}
     {:ok, [hostname, " ESMTP Postbeam"], state}
   end
 
-  @impl true
+  @impl Handler
+  @doc false
+  @spec handle_HELO(binary(), state()) :: {:ok, pos_integer(), state()}
   def handle_HELO(hostname, state) do
     {:ok, state.config[:max_size], %{state | helo: hostname}}
   end
 
-  @impl true
+  @impl Handler
+  @doc false
+  @spec handle_EHLO(binary(), list(), state()) :: {:ok, list(), state()}
   def handle_EHLO(hostname, extensions, state) do
     extensions =
       extensions
@@ -35,16 +51,24 @@ defmodule Postbeam.Inbound.Session do
     {:ok, extensions, %{state | helo: hostname}}
   end
 
-  @impl true
+  @impl Handler
+  @doc false
+  @spec handle_STARTTLS(state()) :: state()
   def handle_STARTTLS(state), do: %{state | tls: true, helo: nil}
 
-  @impl true
+  @impl Handler
+  @doc false
+  @spec handle_MAIL(binary(), state()) :: {:ok, state()}
   def handle_MAIL(_from, state), do: {:ok, state}
 
-  @impl true
+  @impl Handler
+  @doc false
+  @spec handle_MAIL_extension(binary(), state()) :: :error
   def handle_MAIL_extension(_extension, _state), do: :error
 
-  @impl true
+  @impl Handler
+  @doc false
+  @spec handle_RCPT(binary(), state()) :: {:ok, state()} | {:error, charlist(), state()}
   def handle_RCPT(to, state) do
     case call_adapter(state.config[:adapter], :accept_recipient, to) do
       :ok -> {:ok, state}
@@ -52,10 +76,15 @@ defmodule Postbeam.Inbound.Session do
     end
   end
 
-  @impl true
+  @impl Handler
+  @doc false
+  @spec handle_RCPT_extension(binary(), state()) :: :error
   def handle_RCPT_extension(_extension, _state), do: :error
 
-  @impl true
+  @impl Handler
+  @doc false
+  @spec handle_DATA(binary(), [binary()], binary(), state()) ::
+          {:ok | :error, charlist(), state()}
   def handle_DATA(from, to, data, state) do
     # The DATA reader removes the CRLF preceding the SMTP terminator along with it.
     # Restore the final message line ending before handing the MIME bytes over.
@@ -81,22 +110,32 @@ defmodule Postbeam.Inbound.Session do
     end
   end
 
-  @impl true
+  @impl Handler
+  @doc false
+  @spec handle_RSET(state()) :: state()
   def handle_RSET(state), do: state
 
-  @impl true
+  @impl Handler
+  @doc false
+  @spec handle_VRFY(binary(), state()) :: {:error, charlist(), state()}
   def handle_VRFY(_address, state), do: {:error, ~c"252 Cannot verify user", state}
 
-  @impl true
+  @impl Handler
+  @doc false
+  @spec handle_other(binary(), binary(), state()) :: {charlist(), state()}
   def handle_other(_verb, _arguments, state), do: {~c"500 Command unrecognized", state}
 
-  @impl true
+  @impl Handler
+  @doc false
+  @spec code_change(term(), state(), term()) :: {:ok, state()}
   def code_change(_version, state, _extra), do: {:ok, state}
 
-  @impl true
+  @impl Handler
+  @doc false
+  @spec terminate(term(), state()) :: {:ok, term(), state()}
   def terminate(reason, state), do: {:ok, reason, state}
 
-  @spec call_adapter(Postbeam.Inbound.adapter(), atom(), term()) :: :ok | {:error, charlist()}
+  @spec call_adapter(Inbound.adapter(), atom(), term()) :: :ok | {:error, charlist()}
   defp call_adapter({module, options}, function, argument) do
     module |> apply(function, [argument, options]) |> response()
   rescue

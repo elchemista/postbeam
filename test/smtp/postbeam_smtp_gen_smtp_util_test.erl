@@ -160,4 +160,4 @@ rfc2047_utf8_encode_test() ->
         "=?UTF-8?B?4oKsIOKCrCDigqwg4oKsIOKCrCAxMjM0IOKCrCDigqwg4oKsIOKCrCAxMjMg?=\r\n"
         " =?UTF-8?B?4oKsIOKCrCDigqwg4oKsIOKCrCAxMjM04oKs?="
     >>,
-    ?assertEqual(Encoded, 'Elixir.Postbeam.SMTP.MIME':rfc2047_utf8_encode(UnicodeString)).
+    ?assertEqual(Encoded, 'Elixir.Postbeam.SMTP.MIME.EncodedWord':rfc2047_utf8_encode(UnicodeString)).

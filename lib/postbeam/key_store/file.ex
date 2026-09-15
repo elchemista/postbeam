@@ -11,11 +11,14 @@ defmodule Postbeam.KeyStore.File do
   This adapter does not back up keys, follow deployment migrations or rotate
   them. Use a shared persistent store for multiple nodes using the same selector.
   """
-  @behaviour Postbeam.KeyStore
 
-  @impl Postbeam.KeyStore
+  alias Postbeam.Config
+  alias Postbeam.KeyStore
+  @behaviour KeyStore
+
+  @impl KeyStore
   @doc "Reads the PEM for a domain and selector from the configured directory."
-  @spec fetch(Postbeam.KeyStore.id(), keyword()) ::
+  @spec fetch(KeyStore.id(), keyword()) ::
           {:ok, binary()} | :not_found | {:error, term()}
   def fetch(id, options) do
     with {:ok, path} <- path(id, options) do
@@ -26,9 +29,9 @@ defmodule Postbeam.KeyStore.File do
     end
   end
 
-  @impl Postbeam.KeyStore
+  @impl KeyStore
   @doc "Atomically persists a new PEM without overwriting an existing key."
-  @spec put_new(Postbeam.KeyStore.id(), binary(), keyword()) :: :ok | {:error, term()}
+  @spec put_new(KeyStore.id(), binary(), keyword()) :: :ok | {:error, term()}
   def put_new(id, pem, options) do
     with {:ok, path} <- path(id, options),
          :ok <- File.mkdir_p(Path.dirname(path)) do
@@ -36,12 +39,12 @@ defmodule Postbeam.KeyStore.File do
     end
   end
 
-  @spec path(Postbeam.KeyStore.id(), keyword()) :: {:ok, String.t()} | {:error, :invalid_key_path}
+  @spec path(KeyStore.id(), keyword()) :: {:ok, String.t()} | {:error, :invalid_key_path}
   defp path({domain, selector}, options) do
     directory =
       Keyword.get_lazy(options, :directory, fn -> Application.app_dir(:postbeam, "priv/keys") end)
 
-    if Postbeam.Config.domain?(domain) and Postbeam.Config.domain?(selector) and
+    if Config.domain?(domain) and Config.domain?(selector) and
          is_binary(directory) and Keyword.keys(options) -- [:directory] == [] do
       {:ok, Path.join([directory, domain, selector <> ".pem"])}
     else

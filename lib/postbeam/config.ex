@@ -12,6 +12,12 @@ defmodule Postbeam.Config do
   milliseconds. `smtp_timeout` bounds each IP attempt, not the whole delivery.
   """
 
+  alias Postbeam.KeyStore
+  alias Postbeam.KeyStore.File
+  alias Postbeam.MX
+  alias Postbeam.SMTP
+  alias Postbeam.Store
+
   @typedoc "STARTTLS policy; optional TLS can fall back to plaintext."
   @type tls :: :always | :if_available | :never
   @type milliseconds :: 1..4_294_967_295
@@ -23,7 +29,7 @@ defmodule Postbeam.Config do
           | {:connect_timeout | :smtp_timeout | :dns_timeout, milliseconds()}
           | {:dns_options, keyword()}
           | {:dkim, keyword() | nil}
-          | {:key_store, Postbeam.KeyStore.adapter()}
+          | {:key_store, KeyStore.adapter()}
           | {:resolver | :transport, module()}
   @type t :: [option()]
   @type error :: {:invalid, :config} | {:invalid_config, atom()}
@@ -38,9 +44,9 @@ defmodule Postbeam.Config do
     dns_timeout: 5_000,
     dns_options: [],
     dkim: nil,
-    key_store: Postbeam.KeyStore.File,
-    resolver: Postbeam.MX,
-    transport: Postbeam.SMTP
+    key_store: File,
+    resolver: MX,
+    transport: SMTP
   ]
 
   @doc """
@@ -110,7 +116,7 @@ defmodule Postbeam.Config do
   defp valid?(key, value) when key in [:tls_options, :dns_options], do: keyword?(value)
   defp valid?(:resolver, value), do: adapter?(value, :lookup, 3)
   defp valid?(:transport, value), do: adapter?(value, :deliver, 3)
-  defp valid?(:key_store, value), do: Postbeam.Store.valid?(value, fetch: 2, put_new: 3)
+  defp valid?(:key_store, value), do: Store.valid?(value, fetch: 2, put_new: 3)
   defp valid?(:dkim, nil), do: true
 
   defp valid?(:dkim, value) do
