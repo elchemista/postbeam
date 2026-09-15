@@ -15,6 +15,11 @@ defmodule Postbeam.Inbound do
   transaction, with all accepted recipients. It can call an API, store data,
   enqueue work or apply any other application policy.
 
+  Set `decode: true` to also populate `message.decoded` with the built-in MIME
+  decoder. The original MIME bytes remain available in `message.data`.
+  Parsing failures set `message.decode_error`; the adapter still decides
+  whether to accept or reject the message.
+
   Callbacks run synchronously in each SMTP session. Only `:ok` confirms
   acceptance. Return a temporary error to ask the sender to retry, or a
   permanent error to reject the recipient/message. Unexpected return values,
@@ -49,6 +54,7 @@ defmodule Postbeam.Inbound do
           | {:session_timeout, pos_integer()}
           | {:tls_timeout, pos_integer()}
           | {:allow_bare_newlines, false | :ignore | :fix | :strip}
+          | {:decode, boolean()}
           | {:tls_options, keyword()}
 
   @doc """
@@ -81,6 +87,7 @@ defmodule Postbeam.Inbound do
     session_timeout: 180_000,
     tls_timeout: 5_000,
     allow_bare_newlines: false,
+    decode: false,
     tls_options: []
   ]
 
@@ -97,6 +104,8 @@ defmodule Postbeam.Inbound do
   `:session_timeout` (180,000 ms) bounds command/DATA waits and `:tls_timeout`
   (5,000 ms) bounds STARTTLS. `:allow_bare_newlines` defaults to `false`;
   `:ignore`, `:fix` and `:strip` explicitly allow other DATA newline policies.
+  `:decode` defaults to `false`; set it to `true` to decode MIME before calling
+  the message adapter.
   """
   @spec child_spec([option()]) :: Supervisor.child_spec()
   def child_spec(options) do
@@ -178,6 +187,7 @@ defmodule Postbeam.Inbound do
     do: is_integer(value) and value in 1..4_294_967_295
 
   defp valid?(:allow_bare_newlines, value), do: value in [false, :ignore, :fix, :strip]
+  defp valid?(:decode, value), do: is_boolean(value)
   defp valid?(:tls_options, value), do: match?({:ok, _}, Config.keyword(value, :tls_options))
   defp valid?(_, _), do: false
 

@@ -102,7 +102,12 @@ defmodule Postbeam.Inbound.Session do
     result =
       if byte_size(data) > state.config[:max_size],
         do: {:error, ~c"552 Message too large"},
-        else: call_adapter(state.config[:adapter], :handle_message, message)
+        else:
+          call_adapter(
+            state.config[:adapter],
+            :handle_message,
+            decode_message(message, Keyword.get(state.config, :decode, false))
+          )
 
     case result do
       :ok -> {:ok, ~c"2.0.0 Message accepted", state}
@@ -134,6 +139,16 @@ defmodule Postbeam.Inbound.Session do
   @doc false
   @spec terminate(term(), state()) :: {:ok, term(), state()}
   def terminate(reason, state), do: {:ok, reason, state}
+
+  @spec decode_message(Message.t(), boolean()) :: Message.t()
+  defp decode_message(message, false), do: message
+
+  defp decode_message(message, true) do
+    case Message.decode(message) do
+      {:ok, decoded} -> decoded
+      {:error, reason} -> %{message | decode_error: reason}
+    end
+  end
 
   @spec call_adapter(Inbound.adapter(), atom(), term()) :: :ok | {:error, charlist()}
   defp call_adapter({module, options}, function, argument) do

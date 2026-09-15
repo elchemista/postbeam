@@ -72,6 +72,8 @@ defmodule Postbeam.InboundTest do
     assert message.from == "sender@example.org"
     assert message.to == ["user@example.net", "hidden@example.net"]
     assert message.data == @data
+    assert message.decoded == nil
+    assert message.decode_error == nil
     assert message.peer == {127, 0, 0, 1}
     assert message.helo == "sender.example.org"
     refute message.tls
@@ -255,6 +257,101 @@ defmodule Postbeam.InboundTest do
     refute_receive {:inbound, _, {:message, _}}
   end
 
+  test "optionally decodes nested MIME, encoded headers and attachments before the adapter runs" do
+    {_, port} = listener([], decode: true)
+    socket = connect(port)
+    envelope(socket, "", "hidden@example.net")
+
+    data =
+      "MIME-Version: 1.0\r\nSubject: =?UTF-8?Q?Caff=C3=A8?=\r\n" <>
+        "To: visible@example.org\r\nContent-Type: multipart/mixed; boundary=mixed\r\n\r\n" <>
+        "--mixed\r\nContent-Type: multipart/alternative; boundary=alternative\r\n\r\n" <>
+        "--alternative\r\nContent-Type: text/plain; charset=utf-8\r\n" <>
+        "Content-Transfer-Encoding: base64\r\n\r\nQ2FmZsOo\r\n" <>
+        "--alternative\r\nContent-Type: text/html; charset=utf-8\r\n" <>
+        "Content-Transfer-Encoding: quoted-printable\r\n\r\n<p>Caff=C3=A8</p>\r\n" <>
+        "--alternative--\r\n--mixed\r\nContent-Type: application/octet-stream\r\n" <>
+        "Content-Disposition: attachment; filename=a.bin\r\n" <>
+        "Content-Transfer-Encoding: base64\r\n\r\nAP8=\r\n--mixed--\r\n"
+
+    send_data(socket, data)
+    assert reply(socket) =~ "250 "
+    assert_receive {:inbound, _, {:message, message}}
+    assert message.data == data
+    assert message.from == ""
+    assert message.to == ["hidden@example.net"]
+    assert message.decode_error == nil
+
+    assert {"multipart", "mixed", headers, _,
+            [
+              {"multipart", "alternative", _, _,
+               [
+                 {"text", "plain", _, _, "Caffè"},
+                 {"text", "html", _, _, "<p>Caffè</p>"}
+               ]},
+              {"application", "octet-stream", _, attachment, <<0, 255>>}
+            ]} = message.decoded
+
+    assert {"Subject", "Caffè"} in headers
+    assert {"To", "visible@example.org"} in headers
+    assert attachment.disposition == "attachment"
+    assert {"filename", "a.bin"} in attachment.disposition_params
+  end
+
+  test "decoding failures reach the adapter with raw bytes and preserve its acceptance decision" do
+    invalid = "MIME-Version: 1.0\r\nContent-Type: multipart/mixed\r\n\r\nPRIVATE raw body\r\n"
+
+    for {result, expected} <- [
+          {:ok, "250 "},
+          {{:error, {:temporary, "Try later"}}, "451 4.3.0 Try later"},
+          {{:error, {:permanent, "Invalid MIME"}}, "550 5.7.1 Invalid MIME"}
+        ] do
+      {_, port} = listener([message_result: result], decode: true)
+      socket = connect(port)
+      envelope(socket)
+      send_data(socket, invalid)
+      response = reply(socket)
+      assert response =~ expected
+      refute response =~ "PRIVATE"
+
+      assert_receive {:inbound, _,
+                      {:message, %{data: ^invalid, decoded: nil, decode_error: :invalid_mime}}}
+
+      assert command(socket, "NOOP") =~ "250 "
+    end
+  end
+
+  test "decoding policy belongs to each listener and raw delivery does not parse malformed MIME" do
+    invalid = "MIME-Version: 1.0\r\nContent-Type: not-a-mime-type\r\n\r\nBody\r\n"
+
+    for decode <- [true, false] do
+      {_, port} = listener([], decode: decode)
+      socket = connect(port)
+      envelope(socket)
+      send_data(socket, invalid)
+      assert reply(socket) =~ "250 "
+      assert_receive {:inbound, _, {:message, message}}
+      assert message.data == invalid
+      assert message.decoded == nil
+      assert message.decode_error == if(decode, do: :invalid_mime, else: nil)
+    end
+  end
+
+  test "a decoding error does not leak into the next transaction" do
+    {_, port} = listener([], decode: true)
+    socket = connect(port)
+    envelope(socket)
+    send_data(socket, "MIME-Version: 1.0\r\nContent-Type: multipart/mixed\r\n\r\nBody\r\n")
+    assert reply(socket) =~ "250 "
+    assert_receive {:inbound, _, {:message, %{decode_error: :invalid_mime}}}
+
+    envelope(socket)
+    send_data(socket)
+    assert reply(socket) =~ "250 "
+    assert_receive {:inbound, _, {:message, %{data: @data, decoded: decoded, decode_error: nil}}}
+    assert {"text", "plain", _, _, "Hello\r\n.one dot\r\n"} = decoded
+  end
+
   test "STARTTLS encrypts reception and resets the client greeting" do
     certificate =
       :public_key.pkix_test_data(%{
@@ -412,6 +509,9 @@ defmodule Postbeam.InboundTest do
           session_timeout: :infinity,
           tls_timeout: -1,
           allow_bare_newlines: true,
+          decode: nil,
+          decode: :raw,
+          decode: [encoding: :raw],
           tls_options: %{},
           unknown: true
         ] do

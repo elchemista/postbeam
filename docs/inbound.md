@@ -74,6 +74,7 @@ outgoing `config :postbeam` settings.
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `:adapter` | Required | Module or `{module, keyword_options}` implementing both callbacks |
+| `:decode` | `false` | Populate `message.decoded` using the built-in MIME decoder before calling the adapter |
 | `:name` | `Postbeam.Inbound` | Unique listener and supervision identity |
 | `:hostname` | `"localhost"` | Hostname in the SMTP greeting |
 | `:address` | `{127, 0, 0, 1}` | Local IPv4 or IPv6 bind address |
@@ -106,6 +107,8 @@ The handler receives a `%Postbeam.Inbound.Message{}`:
 | `:from` | SMTP envelope sender; `""` for a bounce/null reverse path |
 | `:to` | All accepted envelope recipients, in SMTP order |
 | `:data` | Complete raw MIME binary after SMTP dot unescaping |
+| `:decoded` | Decoded MIME tree, or `nil` when decoding is disabled or fails |
+| `:decode_error` | `:invalid_mime` if automatic decoding failed, otherwise `nil` |
 | `:peer` | Connecting client's IP address |
 | `:helo` | Client's HELO/EHLO name |
 | `:tls` | Whether this connection successfully upgraded using STARTTLS |
@@ -113,15 +116,61 @@ The handler receives a `%Postbeam.Inbound.Message{}`:
 Use the envelope recipients to route messages, including blind recipients.
 Visible From/To/Cc headers can differ from the envelope and are not used to
 select destinations. Postbeam preserves the MIME bytes, including headers,
-bodies and attachments; it does not decode or rewrite them. If your application
-needs parsed parts, use the built-in MIME codec:
+bodies and attachments, in `message.data`. The `:decode` option adds a parsed
+representation without changing those bytes or the SMTP envelope.
+
+## Raw or decoded MIME
+
+Choose the decoding policy separately for each listener:
+
+```elixir
+{Postbeam.Inbound,
+ adapter: {MyApp.IncomingMail, domains: ["example.com"], handler: &MyApp.MailPipeline.handle/1},
+ hostname: "mx.example.com",
+ port: 2525,
+ decode: true}
+```
+
+- `decode: false` (default): `message.data` contains the raw MIME;
+  `message.decoded` and `message.decode_error` are `nil`. No MIME parsing occurs.
+- `decode: true`: `message.decoded` contains
+  `{type, subtype, headers, parameters, body}`. Leaf bodies are decoded binaries,
+  multipart bodies are lists of child tuples, and `message/rfc822` parts contain
+  a nested tuple. Attachment filenames and disposition are in `parameters`.
+
+Decoding uses `Postbeam.SMTP.MIME.decode/1`. Base64 and quoted-printable body
+encodings are decoded, including attachments. With the optional `:eiconv`
+dependency installed, encoded headers and declared text charsets are converted
+to UTF-8 using the codec's defaults. Without it, charset bytes and header
+encodings are preserved; bodies are still transfer-decoded.
+
+On failure, `message.decoded` is `nil` and `message.decode_error` is
+`:invalid_mime`. The adapter is still called with the raw bytes. It may accept
+the message for later processing or return its own temporary/permanent error.
+Parser exception details are not sent to the peer. Size limits apply before
+decoding, and the normal adapter acceptance rules remain in force.
+
+To decode a message yourself when automatic decoding is disabled:
+
+```elixir
+case Postbeam.Inbound.Message.decode(message) do
+  {:ok, decoded_message} ->
+    handler.(decoded_message)
+
+  {:error, :invalid_mime} ->
+    handler.(message) # Or return an adapter rejection.
+end
+```
+
+For explicit charset settings, call the MIME codec directly:
 
 ```elixir
 {type, subtype, headers, parameters, body} =
-  Postbeam.SMTP.MIME.decode(message.data, encoding: :none)
+  Postbeam.SMTP.MIME.decode(message.data, encoding: :raw, allow_missing_version: true)
 ```
 
-Handle parsing failures in your adapter. SMTPUTF8 is not advertised; envelope
+Direct codec calls may raise or throw; handle parsing failures in your adapter.
+SMTPUTF8 is not advertised; envelope
 addresses use ASCII, while MIME headers and bodies can contain Unicode.
 Postbeam does not authenticate inbound sender identities or verify SPF/DKIM/DMARC;
 any such policy belongs to your receiving infrastructure or adapter.

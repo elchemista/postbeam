@@ -73,15 +73,22 @@ then add the listener to your application's supervision tree:
 ```elixir
 {Postbeam.Inbound,
  adapter: {MyApp.IncomingMail, []},
+ decode: true,
  hostname: "mx.example.com",
  address: {0, 0, 0, 0},
  port: 25}
 ```
 
-The adapter receives the raw MIME message and SMTP envelope, and decides whether
-to call an API, save to a database or handle the email another way. Postbeam has
-no built-in message storage. Return `:ok` to accept, or a temporary/permanent
-error to reject. [Complete adapter example and setup](docs/inbound.md).
+The adapter receives the SMTP envelope and raw MIME in `message.data`. With
+`decode: true`, `message.decoded` also contains the MIME tree (headers, bodies
+and attachments); the default `decode: false` passes only raw data. If parsing
+fails, the adapter still receives the raw bytes with
+`message.decode_error == :invalid_mime` and decides whether to accept or reject.
+
+The adapter can call an API, save to a database or handle the email another way.
+Postbeam has no built-in message storage. Return `:ok` to accept, or a
+temporary/permanent error to reject.
+[Complete adapter example and setup](docs/inbound.md).
 
 ## Tests
 
